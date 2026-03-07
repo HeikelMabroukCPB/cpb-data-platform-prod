@@ -37,7 +37,7 @@ LOAD_MODE = os.environ.get("LOAD_MODE", "full").lower()
 INCREMENTAL_FIELD = os.environ.get("INCREMENTAL_FIELD", "updatedSince")
 INCREMENTAL_LOOKBACK_DAYS = int(os.environ.get("INCREMENTAL_LOOKBACK_DAYS", 2))
 
-MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 3))
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 1))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", 60))
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 5000))
 
@@ -178,9 +178,12 @@ def fetch_data() -> pd.DataFrame:
     params = build_incremental_params()
 
     logger.info("Fetching salons data")
+    logger.info(f"API request → URL: {API_URL} | params: {params}")
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
+            logger.info(f"Sending request attempt {attempt}/{MAX_RETRIES}")
+
             response = requests.get(
                 API_URL,
                 headers=headers,
