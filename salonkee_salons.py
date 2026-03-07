@@ -8,7 +8,7 @@ from email.message import EmailMessage
 
 import pandas as pd
 import requests
-from flask import Flask, request
+from flask import Flask
 from google.cloud import bigquery
 
 
@@ -44,7 +44,6 @@ CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 5000))
 SOURCE_SYSTEM = os.environ.get("SOURCE_SYSTEM", "salonkee")
 
 RATE_LIMIT_SLEEP_SECONDS = int(os.environ.get("RATE_LIMIT_SLEEP_SECONDS", 60))
-PAGE_SLEEP_SECONDS = float(os.environ.get("PAGE_SLEEP_SECONDS", 1))
 
 RAW_TABLE = f"{PROJECT_ID}.{DATASET_RAW}.{TABLE_NAME}"
 META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
@@ -176,72 +175,59 @@ def fetch_data() -> pd.DataFrame:
         "Accept": "application/json",
     }
 
-    all_data = []
-    page = 1
-    base_params = build_incremental_params()
+    params = build_incremental_params()
 
-    while True:
-        params = {**base_params, "page": page}
-        logger.info(f"Fetching page {page}")
+    logger.info("Fetching salons data")
 
-        response_data = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.get(
+                API_URL,
+                headers=headers,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+            )
 
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                response = requests.get(
-                    API_URL,
-                    headers=headers,
-                    params=params,
-                    timeout=REQUEST_TIMEOUT,
+            if response.status_code == 429:
+                logger.warning(
+                    f"Rate limit hit (attempt {attempt}/{MAX_RETRIES}). "
+                    f"Sleeping {RATE_LIMIT_SLEEP_SECONDS} seconds."
                 )
 
-                if response.status_code == 429:
-                    logger.warning(
-                        f"Rate limit hit on page {page}, attempt {attempt}/{MAX_RETRIES}. "
-                        f"Sleeping {RATE_LIMIT_SLEEP_SECONDS} seconds before retry."
-                    )
-
-                    if attempt == MAX_RETRIES:
-                        response.raise_for_status()
-
-                    time.sleep(RATE_LIMIT_SLEEP_SECONDS)
-                    continue
-
-                response.raise_for_status()
-                response_data = response.json()
-                break
-
-            except requests.exceptions.HTTPError as e:
-                logger.warning(f"HTTP error on page {page}, attempt {attempt}/{MAX_RETRIES}: {e}")
-
                 if attempt == MAX_RETRIES:
-                    raise
+                    response.raise_for_status()
 
-                time.sleep(2)
+                time.sleep(RATE_LIMIT_SLEEP_SECONDS)
+                continue
 
-            except Exception as e:
-                logger.warning(f"Attempt {attempt}/{MAX_RETRIES} failed for page {page}: {e}")
+            response.raise_for_status()
 
-                if attempt == MAX_RETRIES:
-                    raise
+            data = response.json()
+            records = extract_page_records(data)
 
-                time.sleep(2)
+            df = pd.json_normalize(records)
 
-        records = extract_page_records(response_data)
+            logger.info(f"Fetched {len(df)} rows from API")
 
-        if not records:
-            logger.info("No more pages")
-            break
+            return df
 
-        all_data.extend(records)
-        logger.info(f"Page {page} fetched | rows={len(records)}")
-        page += 1
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"HTTP error attempt {attempt}/{MAX_RETRIES}: {e}")
 
-        time.sleep(PAGE_SLEEP_SECONDS)
+            if attempt == MAX_RETRIES:
+                raise
 
-    df = pd.json_normalize(all_data)
-    logger.info(f"Total rows fetched: {len(df)}")
-    return df
+            time.sleep(2)
+
+        except Exception as e:
+            logger.warning(f"Attempt {attempt}/{MAX_RETRIES} failed: {e}")
+
+            if attempt == MAX_RETRIES:
+                raise
+
+            time.sleep(2)
+
+    raise RuntimeError("Failed to fetch data from API")
 
 
 # =================================
