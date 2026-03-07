@@ -43,6 +43,9 @@ CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 5000))
 
 SOURCE_SYSTEM = os.environ.get("SOURCE_SYSTEM", "salonkee")
 
+RATE_LIMIT_SLEEP_SECONDS = int(os.environ.get("RATE_LIMIT_SLEEP_SECONDS", 60))
+PAGE_SLEEP_SECONDS = float(os.environ.get("PAGE_SLEEP_SECONDS", 1))
+
 RAW_TABLE = f"{PROJECT_ID}.{DATASET_RAW}.{TABLE_NAME}"
 META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 
@@ -191,9 +194,30 @@ def fetch_data() -> pd.DataFrame:
                     params=params,
                     timeout=REQUEST_TIMEOUT,
                 )
+
+                if response.status_code == 429:
+                    logger.warning(
+                        f"Rate limit hit on page {page}, attempt {attempt}/{MAX_RETRIES}. "
+                        f"Sleeping {RATE_LIMIT_SLEEP_SECONDS} seconds before retry."
+                    )
+
+                    if attempt == MAX_RETRIES:
+                        response.raise_for_status()
+
+                    time.sleep(RATE_LIMIT_SLEEP_SECONDS)
+                    continue
+
                 response.raise_for_status()
                 response_data = response.json()
                 break
+
+            except requests.exceptions.HTTPError as e:
+                logger.warning(f"HTTP error on page {page}, attempt {attempt}/{MAX_RETRIES}: {e}")
+
+                if attempt == MAX_RETRIES:
+                    raise
+
+                time.sleep(2)
 
             except Exception as e:
                 logger.warning(f"Attempt {attempt}/{MAX_RETRIES} failed for page {page}: {e}")
@@ -212,6 +236,8 @@ def fetch_data() -> pd.DataFrame:
         all_data.extend(records)
         logger.info(f"Page {page} fetched | rows={len(records)}")
         page += 1
+
+        time.sleep(PAGE_SLEEP_SECONDS)
 
     df = pd.json_normalize(all_data)
     logger.info(f"Total rows fetched: {len(df)}")
