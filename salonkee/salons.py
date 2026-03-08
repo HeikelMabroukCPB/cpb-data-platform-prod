@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from datetime import datetime
 
 import pandas as pd
@@ -13,7 +14,6 @@ from shared.utils import (
     build_incremental_params,
     generate_record_hash_from_values,
     normalize_nullable_string,
-    sleep_with_log,
     validate_common_config,
 )
 
@@ -39,16 +39,21 @@ LOAD_MODE = os.environ.get("LOAD_MODE", "full").lower()
 INCREMENTAL_FIELD = os.environ.get("INCREMENTAL_FIELD", "updatedSince")
 INCREMENTAL_LOOKBACK_DAYS = int(os.environ.get("INCREMENTAL_LOOKBACK_DAYS", 2))
 
-MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 1))
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 3))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", 60))
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 5000))
-RATE_LIMIT_SLEEP_SECONDS = int(os.environ.get("RATE_LIMIT_SLEEP_SECONDS", 60))
+RATE_LIMIT_SLEEP_SECONDS = int(os.environ.get("RATE_LIMIT_SLEEP_SECONDS", 90))
 
 SOURCE_SYSTEM = os.environ.get("SOURCE_SYSTEM", "salonkee")
 
 RAW_TABLE = f"{PROJECT_ID}.{DATASET_RAW}.{SOURCE_SYSTEM}_{TABLE_NAME}"
 META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 
+
+# =================================
+# Table schema
+# Raw = keep source names as-is
+# =================================
 
 TABLE_SCHEMA = [
     bigquery.SchemaField("id", "INT64"),
@@ -103,10 +108,15 @@ def extract_page_records(payload):
     raise ValueError("Unsupported API response format")
 
 
+# =================================
+# API fetch
+# =================================
+
 def fetch_data() -> pd.DataFrame:
     headers = {
         "Authorization": f"Bearer {API_TOKEN}",
         "Accept": "application/json",
+        "User-Agent": "cpb-data-platform/1.0",
     }
 
     params = build_incremental_params(
@@ -129,13 +139,24 @@ def fetch_data() -> pd.DataFrame:
             )
 
             if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+                wait_seconds = (
+                    int(retry_after)
+                    if retry_after and retry_after.isdigit()
+                    else RATE_LIMIT_SLEEP_SECONDS
+                )
+
+                logger.warning(
+                    f"Rate limit hit on attempt {attempt}/{MAX_RETRIES}. "
+                    f"Waiting {wait_seconds} seconds before retry."
+                )
+                logger.warning(f"429 response headers: {dict(response.headers)}")
+                logger.warning(f"429 response body: {response.text}")
+
                 if attempt == MAX_RETRIES:
                     response.raise_for_status()
 
-                sleep_with_log(
-                    RATE_LIMIT_SLEEP_SECONDS,
-                    f"Rate limit hit on attempt {attempt}/{MAX_RETRIES}"
-                )
+                time.sleep(wait_seconds)
                 continue
 
             response.raise_for_status()
@@ -151,16 +172,26 @@ def fetch_data() -> pd.DataFrame:
 
         except requests.exceptions.HTTPError as e:
             logger.warning(f"HTTP error on attempt {attempt}/{MAX_RETRIES}: {e}")
+
             if attempt == MAX_RETRIES:
                 raise
+
+            time.sleep(5)
 
         except Exception as e:
             logger.warning(f"Attempt {attempt}/{MAX_RETRIES} failed: {e}")
+
             if attempt == MAX_RETRIES:
                 raise
 
+            time.sleep(5)
+
     raise RuntimeError("Failed to fetch data from API")
 
+
+# =================================
+# Transform
+# =================================
 
 def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     logger.info("Transforming dataframe for raw layer")
@@ -198,12 +229,17 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     return df
 
 
+# =================================
+# Main ETL
+# =================================
+
 def run_etl():
     client = get_bq_client()
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     started_at = datetime.utcnow()
 
     logger.info(f"Pipeline started | pipeline={PIPELINE_NAME} | run_id={run_id}")
+    logger.info(f"Target raw table: {RAW_TABLE}")
 
     try:
         validate_config()
@@ -233,7 +269,9 @@ def run_etl():
             message="Pipeline succeeded",
         )
 
-        logger.info(f"Pipeline finished successfully | rows_loaded={len(df)} | run_id={run_id}")
+        logger.info(
+            f"Pipeline finished successfully | rows_loaded={len(df)} | run_id={run_id}"
+        )
         return f"{len(df)} rows loaded into {RAW_TABLE}", 200
 
     except Exception as e:
