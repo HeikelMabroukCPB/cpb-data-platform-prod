@@ -5,7 +5,7 @@ from google.cloud import bigquery
 
 API_URL = os.environ["API_URL"]
 API_TOKEN = os.environ["API_TOKEN"]
-TABLE_ID = os.environ["TABLE_ID"]  # project.dataset.table
+TABLE_ID = os.environ["TABLE_ID"]
 
 response = requests.get(
     API_URL,
