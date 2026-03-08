@@ -1,6 +1,31 @@
 steps:
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/pipelines:$COMMIT_SHA', '.']
 
-images:
-  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/pipelines:$COMMIT_SHA'
+# Build container
+- name: 'gcr.io/cloud-builders/docker'
+  args: [
+    'build',
+    '-t',
+    'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:latest',
+    '.'
+  ]
+
+# Push container
+- name: 'gcr.io/cloud-builders/docker'
+  args: [
+    'push',
+    'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:latest'
+  ]
+
+# Deploy update to Cloud Run Job
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: [
+    'run',
+    'jobs',
+    'update',
+    'salonkee-salons',
+    '--image',
+    'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:latest',
+    '--region',
+    'europe-west1'
+  ]
