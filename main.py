@@ -10,8 +10,8 @@ TABLE_ID = os.environ["TABLE_ID"]  # project.dataset.table
 response = requests.get(
     API_URL,
     headers={"Authorization": f"Bearer {API_TOKEN}"},
+    timeout=60,
 )
-
 response.raise_for_status()
 
 data = response.json()
@@ -32,7 +32,6 @@ job = client.load_table_from_dataframe(
         write_disposition="WRITE_TRUNCATE",
     ),
 )
-
 job.result()
 
 print(f"{len(df)} rows loaded into {TABLE_ID}")
