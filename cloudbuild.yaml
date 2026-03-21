@@ -1,31 +1,56 @@
 steps:
+  # Build one shared image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '-t'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:latest'
+      - '.'
 
-# Build container
-- name: 'gcr.io/cloud-builders/docker'
-  args: [
-    'build',
-    '-t',
-    'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:latest',
-    '.'
-  ]
+  # Push commit-tagged image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
 
-# Push container
-- name: 'gcr.io/cloud-builders/docker'
-  args: [
-    'push',
-    'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:latest'
-  ]
+  # Push latest image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:latest'
 
-# Deploy update to Cloud Run Job
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  entrypoint: gcloud
-  args: [
-    'run',
-    'jobs',
-    'update',
-    'salonkee-salons',
-    '--image',
-    'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:latest',
-    '--region',
-    'europe-west1'
-  ]
+  # Update Cloud Run job: salons
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'deploy'
+      - 'salonkee-salons'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+      - '--set-env-vars'
+      - 'MODULE_NAME=salonkee.salonkee_salons'
+
+  # Update Cloud Run job: customers
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'deploy'
+      - 'salonkee-customers'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+      - '--set-env-vars'
+      - 'MODULE_NAME=salonkee.salonkee_customers'
+
+images:
+  - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+  - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:latest'
