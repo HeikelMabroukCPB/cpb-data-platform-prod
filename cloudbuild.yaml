@@ -33,8 +33,6 @@ steps:
       - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
       - '--region'
       - 'europe-west1'
-      - '--set-env-vars'
-      - 'MODULE_NAME=salonkee.salonkee_salons'
 
   # Update Cloud Run job: customers
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -48,8 +46,6 @@ steps:
       - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
       - '--region'
       - 'europe-west1'
-      - '--set-env-vars'
-      - 'MODULE_NAME=salonkee.salonkee_customers'
 
 options:
   logging: CLOUD_LOGGING_ONLY
