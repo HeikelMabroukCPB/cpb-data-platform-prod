@@ -27,7 +27,7 @@ steps:
     args:
       - 'run'
       - 'jobs'
-      - 'deploy'
+      - 'update'
       - 'salonkee-salons'
       - '--image'
       - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
@@ -42,7 +42,7 @@ steps:
     args:
       - 'run'
       - 'jobs'
-      - 'deploy'
+      - 'update'
       - 'salonkee-customers'
       - '--image'
       - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
@@ -50,6 +50,9 @@ steps:
       - 'europe-west1'
       - '--set-env-vars'
       - 'MODULE_NAME=salonkee.salonkee_customers'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
 
 images:
   - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
