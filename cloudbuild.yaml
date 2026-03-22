@@ -60,6 +60,7 @@ steps:
       - '--region'
       - 'europe-west1'
 
+  # Update Cloud Run job: products
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -72,6 +73,7 @@ steps:
       - '--region'
       - 'europe-west1'
 
+  # Update Cloud Run job: services
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -79,6 +81,19 @@ steps:
       - 'jobs'
       - 'update'
       - 'salonkee-services'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: sales
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'salonkee-sales'
       - '--image'
       - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
       - '--region'
