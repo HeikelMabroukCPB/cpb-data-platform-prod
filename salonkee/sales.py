@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import time
@@ -29,8 +30,8 @@ PROJECT_ID = os.environ.get("PROJECT_ID", "cpb-data-platform-prod")
 DATASET_RAW = os.environ.get("DATASET_RAW", "cpb_raw")
 DATASET_META = os.environ.get("DATASET_META", "cpb_meta")
 
-PIPELINE_NAME = os.environ.get("PIPELINE_NAME", "salonkee_salons")
-TABLE_NAME = os.environ.get("TABLE_NAME", "salons")
+PIPELINE_NAME = os.environ.get("PIPELINE_NAME", "salonkee_sales")
+TABLE_NAME = os.environ.get("TABLE_NAME", "sales")
 
 API_URL = os.environ.get("API_URL")
 API_TOKEN = os.environ.get("API_TOKEN")
@@ -56,9 +57,22 @@ META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 # =================================
 
 TABLE_SCHEMA = [
-    bigquery.SchemaField("id", "INT64"),
-    bigquery.SchemaField("displayName", "STRING"),
-    bigquery.SchemaField("link", "STRING"),
+    bigquery.SchemaField("transaction_id", "INT64"),
+    bigquery.SchemaField("customer_id", "STRING"),
+    bigquery.SchemaField("employee_id", "INT64"),
+    bigquery.SchemaField("entry_id", "INT64"),
+    bigquery.SchemaField("entry_name", "STRING"),
+    bigquery.SchemaField("salon_id", "INT64"),
+    bigquery.SchemaField("service_group_id", "INT64"),
+    bigquery.SchemaField("type", "STRING"),
+    bigquery.SchemaField("is_deposit", "BOOL"),
+    bigquery.SchemaField("deposit_transaction_id", "INT64"),
+    bigquery.SchemaField("price", "FLOAT64"),
+    bigquery.SchemaField("price_before_discount", "FLOAT64"),
+    bigquery.SchemaField("created", "TIMESTAMP"),
+    bigquery.SchemaField("is_cancelled", "BOOL"),
+    bigquery.SchemaField("cancelled_transaction_id", "INT64"),
+    bigquery.SchemaField("voucher_info", "STRING"),
     bigquery.SchemaField("source_system", "STRING"),
     bigquery.SchemaField("run_id", "STRING"),
     bigquery.SchemaField("load_timestamp", "TIMESTAMP"),
@@ -67,9 +81,22 @@ TABLE_SCHEMA = [
 ]
 
 SELECTED_COLUMNS = [
-    "id",
-    "displayName",
-    "link",
+    "transaction_id",
+    "customer_id",
+    "employee_id",
+    "entry_id",
+    "entry_name",
+    "salon_id",
+    "service_group_id",
+    "type",
+    "is_deposit",
+    "deposit_transaction_id",
+    "price",
+    "price_before_discount",
+    "created",
+    "is_cancelled",
+    "cancelled_transaction_id",
+    "voucher_info",
 ]
 
 
@@ -106,6 +133,16 @@ def extract_page_records(payload):
         return [payload]
 
     raise ValueError("Unsupported API response format")
+
+
+def normalize_json_field(value):
+    if pd.isna(value) or value is None:
+        return None
+
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    return str(value)
 
 
 # =================================
@@ -205,9 +242,22 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
 
     df = df[SELECTED_COLUMNS].copy()
 
-    df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
-    df["displayName"] = normalize_nullable_string(df["displayName"])
-    df["link"] = normalize_nullable_string(df["link"])
+    df["transaction_id"] = pd.to_numeric(df["transaction_id"], errors="coerce").astype("Int64")
+    df["customer_id"] = normalize_nullable_string(df["customer_id"])
+    df["employee_id"] = pd.to_numeric(df["employee_id"], errors="coerce").astype("Int64")
+    df["entry_id"] = pd.to_numeric(df["entry_id"], errors="coerce").astype("Int64")
+    df["entry_name"] = normalize_nullable_string(df["entry_name"])
+    df["salon_id"] = pd.to_numeric(df["salon_id"], errors="coerce").astype("Int64")
+    df["service_group_id"] = pd.to_numeric(df["service_group_id"], errors="coerce").astype("Int64")
+    df["type"] = normalize_nullable_string(df["type"])
+    df["is_deposit"] = df["is_deposit"].astype("boolean")
+    df["deposit_transaction_id"] = pd.to_numeric(df["deposit_transaction_id"], errors="coerce").astype("Int64")
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df["price_before_discount"] = pd.to_numeric(df["price_before_discount"], errors="coerce")
+    df["created"] = pd.to_datetime(df["created"], errors="coerce", utc=True)
+    df["is_cancelled"] = df["is_cancelled"].astype("boolean")
+    df["cancelled_transaction_id"] = pd.to_numeric(df["cancelled_transaction_id"], errors="coerce").astype("Int64")
+    df["voucher_info"] = df["voucher_info"].apply(normalize_json_field)
 
     load_timestamp = datetime.utcnow()
     load_date = load_timestamp.date()
@@ -218,9 +268,22 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     df["load_date"] = load_date
     df["record_hash"] = df.apply(
         lambda row: generate_record_hash_from_values(
-            row.get("id"),
-            row.get("displayName"),
-            row.get("link"),
+            row.get("transaction_id"),
+            row.get("customer_id"),
+            row.get("employee_id"),
+            row.get("entry_id"),
+            row.get("entry_name"),
+            row.get("salon_id"),
+            row.get("service_group_id"),
+            row.get("type"),
+            row.get("is_deposit"),
+            row.get("deposit_transaction_id"),
+            row.get("price"),
+            row.get("price_before_discount"),
+            row.get("created"),
+            row.get("is_cancelled"),
+            row.get("cancelled_transaction_id"),
+            row.get("voucher_info"),
         ),
         axis=1,
     )
