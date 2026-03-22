@@ -86,6 +86,19 @@ steps:
       - '--region'
       - 'europe-west1'
 
+  # Update Cloud Run job: events
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'salonkee-events'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
   # Update Cloud Run job: sales
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
