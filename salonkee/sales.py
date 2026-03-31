@@ -40,6 +40,10 @@ LOAD_MODE = os.environ.get("LOAD_MODE", "full").lower()
 INCREMENTAL_FIELD = os.environ.get("INCREMENTAL_FIELD", "updatedSince")
 INCREMENTAL_LOOKBACK_DAYS = int(os.environ.get("INCREMENTAL_LOOKBACK_DAYS", 2))
 
+BACKFILL_START_DATE = os.environ.get("BACKFILL_START_DATE")  # YYYY-MM-DD
+BACKFILL_END_DATE = os.environ.get("BACKFILL_END_DATE")      # YYYY-MM-DD
+WRITE_MODE = os.environ.get("WRITE_MODE", "append").lower()  # append | replace_window
+
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 3))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", 60))
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 5000))
@@ -116,8 +120,26 @@ def validate_config() -> None:
         "SOURCE_SYSTEM": SOURCE_SYSTEM,
     })
 
-    if LOAD_MODE not in ["full", "incremental"]:
-        raise ValueError("LOAD_MODE must be either 'full' or 'incremental'")
+    if LOAD_MODE not in ["full", "incremental", "backfill"]:
+        raise ValueError("LOAD_MODE must be either 'full', 'incremental', or 'backfill'")
+
+    if WRITE_MODE not in ["append", "replace_window"]:
+        raise ValueError("WRITE_MODE must be either 'append' or 'replace_window'")
+
+    if LOAD_MODE == "backfill":
+        if not BACKFILL_START_DATE or not BACKFILL_END_DATE:
+            raise ValueError(
+                "BACKFILL_START_DATE and BACKFILL_END_DATE are required when LOAD_MODE='backfill'"
+            )
+
+        try:
+            start_date = datetime.strptime(BACKFILL_START_DATE, "%Y-%m-%d").date()
+            end_date = datetime.strptime(BACKFILL_END_DATE, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError("BACKFILL_START_DATE and BACKFILL_END_DATE must be in YYYY-MM-DD format")
+
+        if start_date > end_date:
+            raise ValueError("BACKFILL_START_DATE cannot be later than BACKFILL_END_DATE")
 
 
 def extract_page_records(payload):
@@ -145,6 +167,71 @@ def normalize_json_field(value):
     return str(value)
 
 
+def build_api_params():
+    if LOAD_MODE == "full":
+        return {}
+
+    if LOAD_MODE == "incremental":
+        return build_incremental_params(
+            load_mode=LOAD_MODE,
+            incremental_field=INCREMENTAL_FIELD,
+            incremental_lookback_days=INCREMENTAL_LOOKBACK_DAYS,
+        )
+
+    if LOAD_MODE == "backfill":
+        # Adjust these param names if Salonkee expects something else.
+        return {
+            "startDate": BACKFILL_START_DATE,
+            "endDate": BACKFILL_END_DATE,
+        }
+
+    raise ValueError(f"Unsupported LOAD_MODE: {LOAD_MODE}")
+
+
+def delete_backfill_window(client: bigquery.Client, table_id: str, start_date: str, end_date: str) -> None:
+    logger.info(
+        f"Deleting existing rows from backfill window | table={table_id} | "
+        f"start_date={start_date} | end_date={end_date}"
+    )
+
+    query = f"""
+    DELETE FROM `{table_id}`
+    WHERE DATE(created) BETWEEN @start_date AND @end_date
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("start_date", "DATE", start_date),
+            bigquery.ScalarQueryParameter("end_date", "DATE", end_date),
+        ]
+    )
+
+    client.query(query, job_config=job_config).result()
+    logger.info("Backfill window delete completed")
+
+
+def apply_backfill_window_filter(df: pd.DataFrame) -> pd.DataFrame:
+    if LOAD_MODE != "backfill":
+        return df
+
+    logger.info(
+        f"Applying local backfill filter on created date | "
+        f"start_date={BACKFILL_START_DATE} | end_date={BACKFILL_END_DATE}"
+    )
+
+    start_date = pd.to_datetime(BACKFILL_START_DATE).date()
+    end_date = pd.to_datetime(BACKFILL_END_DATE).date()
+
+    filtered_df = df[
+        df["created"].notna() &
+        (df["created"].dt.date >= start_date) &
+        (df["created"].dt.date <= end_date)
+    ].copy()
+
+    logger.info(f"Backfill window filter complete | rows_before={len(df)} | rows_after={len(filtered_df)}")
+    return filtered_df
+
+
 # =================================
 # API fetch
 # =================================
@@ -156,12 +243,7 @@ def fetch_data() -> pd.DataFrame:
         "User-Agent": "cpb-data-platform/1.0",
     }
 
-    params = build_incremental_params(
-        load_mode=LOAD_MODE,
-        incremental_field=INCREMENTAL_FIELD,
-        incremental_lookback_days=INCREMENTAL_LOOKBACK_DAYS,
-    )
-
+    params = build_api_params()
     logger.info(f"Fetching data from API | url={API_URL} | params={params}")
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -303,12 +385,27 @@ def run_etl():
 
     logger.info(f"Pipeline started | pipeline={PIPELINE_NAME} | run_id={run_id}")
     logger.info(f"Target raw table: {RAW_TABLE}")
+    logger.info(
+        f"Execution context | load_mode={LOAD_MODE} | write_mode={WRITE_MODE} | "
+        f"backfill_start_date={BACKFILL_START_DATE} | backfill_end_date={BACKFILL_END_DATE}"
+    )
 
     try:
         validate_config()
 
+        if LOAD_MODE == "backfill" and WRITE_MODE == "replace_window":
+            delete_backfill_window(
+                client=client,
+                table_id=RAW_TABLE,
+                start_date=BACKFILL_START_DATE,
+                end_date=BACKFILL_END_DATE,
+            )
+
         raw_df = fetch_data()
         df = transform_dataframe(raw_df, run_id)
+
+        if LOAD_MODE == "backfill":
+            df = apply_backfill_window_filter(df)
 
         load_dataframe_in_chunks(
             client=client,
@@ -320,6 +417,14 @@ def run_etl():
 
         finished_at = datetime.utcnow()
 
+        success_message = (
+            f"Pipeline succeeded | load_mode={LOAD_MODE} | write_mode={WRITE_MODE}"
+        )
+        if LOAD_MODE == "backfill":
+            success_message += (
+                f" | window={BACKFILL_START_DATE} to {BACKFILL_END_DATE}"
+            )
+
         log_pipeline_run(
             client=client,
             meta_table=META_TABLE,
@@ -329,7 +434,7 @@ def run_etl():
             rows_loaded=len(df),
             started_at=started_at,
             finished_at=finished_at,
-            message="Pipeline succeeded",
+            message=success_message,
         )
 
         logger.info(
@@ -339,6 +444,13 @@ def run_etl():
 
     except Exception as e:
         finished_at = datetime.utcnow()
+
+        error_message = str(e)
+        if LOAD_MODE == "backfill":
+            error_message = (
+                f"{error_message} | load_mode={LOAD_MODE} | "
+                f"window={BACKFILL_START_DATE} to {BACKFILL_END_DATE}"
+            )
 
         try:
             log_pipeline_run(
@@ -350,7 +462,7 @@ def run_etl():
                 rows_loaded=0,
                 started_at=started_at,
                 finished_at=finished_at,
-                message=str(e),
+                message=error_message,
             )
         except Exception as log_error:
             logger.error(f"Could not log failed pipeline run: {log_error}")
@@ -361,6 +473,10 @@ def run_etl():
                 f"Pipeline: {PIPELINE_NAME}\n"
                 f"Run ID: {run_id}\n"
                 f"Time: {finished_at}\n"
+                f"Load mode: {LOAD_MODE}\n"
+                f"Write mode: {WRITE_MODE}\n"
+                f"Backfill start date: {BACKFILL_START_DATE}\n"
+                f"Backfill end date: {BACKFILL_END_DATE}\n"
                 f"Error: {str(e)}"
             ),
         )
