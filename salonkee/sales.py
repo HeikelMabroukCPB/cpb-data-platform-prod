@@ -179,10 +179,9 @@ def build_api_params():
         )
 
     if LOAD_MODE == "backfill":
-        # Adjust these param names if Salonkee expects something else.
         return {
-            "startDate": BACKFILL_START_DATE,
-            "endDate": BACKFILL_END_DATE,
+            "startTime": BACKFILL_START_DATE,
+            "endTime": BACKFILL_END_DATE,
         }
 
     raise ValueError(f"Unsupported LOAD_MODE: {LOAD_MODE}")
