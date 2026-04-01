@@ -29,7 +29,8 @@ PROJECT_ID = os.environ.get("PROJECT_ID", "cpb-data-platform-prod")
 DATASET_RAW = os.environ.get("DATASET_RAW", "cpb_raw")
 DATASET_META = os.environ.get("DATASET_META", "cpb_meta")
 
-PIPELINE_NAME = os.environ.get("PIPELINE_NAME", "sharepoint_list")
+MODULE_NAME = os.environ.get("MODULE_NAME", "sharepoint_list.services_map")
+PIPELINE_NAME = os.environ.get("PIPELINE_NAME", "sharepoint_services_map")
 TABLE_NAME = os.environ.get("TABLE_NAME", "services_map")
 
 TENANT_ID = os.environ.get("TENANT_ID")
@@ -94,6 +95,7 @@ def validate_config() -> None:
         "PROJECT_ID": PROJECT_ID,
         "DATASET_RAW": DATASET_RAW,
         "DATASET_META": DATASET_META,
+        "MODULE_NAME": MODULE_NAME,
         "PIPELINE_NAME": PIPELINE_NAME,
         "TABLE_NAME": TABLE_NAME,
         "SOURCE_SYSTEM": SOURCE_SYSTEM,
@@ -344,7 +346,9 @@ def run_etl():
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     started_at = datetime.utcnow()
 
-    logger.info(f"Pipeline started | pipeline={PIPELINE_NAME} | run_id={run_id}")
+    logger.info(
+        f"Pipeline started | module_name={MODULE_NAME} | pipeline={PIPELINE_NAME} | run_id={run_id}"
+    )
     logger.info(f"Target raw table: {RAW_TABLE}")
     logger.info(f"Execution context | load_mode={LOAD_MODE}")
 
@@ -373,7 +377,7 @@ def run_etl():
             rows_loaded=len(df),
             started_at=started_at,
             finished_at=finished_at,
-            message="Pipeline succeeded | load_mode=full",
+            message=f"Pipeline succeeded | module_name={MODULE_NAME} | load_mode=full",
         )
 
         logger.info(
@@ -394,7 +398,7 @@ def run_etl():
                 rows_loaded=0,
                 started_at=started_at,
                 finished_at=finished_at,
-                message=str(e),
+                message=f"module_name={MODULE_NAME} | {str(e)}",
             )
         except Exception as log_error:
             logger.error(f"Could not log failed pipeline run: {log_error}")
@@ -403,6 +407,7 @@ def run_etl():
             subject=f"❌ {PIPELINE_NAME} pipeline failed",
             body=(
                 f"Pipeline: {PIPELINE_NAME}\n"
+                f"Module name: {MODULE_NAME}\n"
                 f"Run ID: {run_id}\n"
                 f"Time: {finished_at}\n"
                 f"Load mode: {LOAD_MODE}\n"
