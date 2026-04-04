@@ -59,6 +59,7 @@ TABLE_SCHEMA = [
     bigquery.SchemaField("online_user_id", "STRING"),
     bigquery.SchemaField("salon_user_id", "STRING"),
     bigquery.SchemaField("prename", "STRING"),
+    bigquery.SchemaField("name", "STRING"),
     bigquery.SchemaField("language", "STRING"),
     bigquery.SchemaField("gender", "STRING"),
     bigquery.SchemaField("created", "TIMESTAMP"),
@@ -74,6 +75,7 @@ SELECTED_COLUMNS = [
     "online_user_id",
     "salon_user_id",
     "prename",
+    "name",
     "language",
     "gender",
     "created",
@@ -216,6 +218,7 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     df["online_user_id"] = normalize_nullable_string(df["online_user_id"])
     df["salon_user_id"] = normalize_nullable_string(df["salon_user_id"])
     df["prename"] = normalize_nullable_string(df["prename"])
+    df["name"] = normalize_nullable_string(df["name"])
     df["language"] = normalize_nullable_string(df["language"])
     df["gender"] = normalize_nullable_string(df["gender"])
     df["created"] = pd.to_datetime(df["created"], errors="coerce", utc=True)
