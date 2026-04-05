@@ -170,7 +170,7 @@ def normalize_json_field(value):
     if value is None:
         return None
 
-    if isinstance(value, float) and pd.isna(value):
+    if pd.isna(value):
         return None
 
     if isinstance(value, (dict, list)):
@@ -186,7 +186,7 @@ def safe_get_field(fields_obj: dict, field_name: str):
 
 
 def parse_timestamp(value):
-    if value is None or value == "":
+    if value is None or (isinstance(value, str) and value.strip() == ""):
         return pd.NaT
     return pd.to_datetime(value, errors="coerce", utc=True)
 
@@ -212,15 +212,23 @@ def map_ninox_type_to_bq(field_meta: dict) -> str:
     if ninox_type in ["datetime", "timestamp", "time"]:
         return "TIMESTAMP"
 
-    # safest fallback for references, arrays, files, formulas, unknown structures
     return "STRING"
 
 
 def cast_series_by_bq_type(series: pd.Series, bq_type: str) -> pd.Series:
     if bq_type == "STRING":
-        return series.apply(
-            lambda x: None if x is None or (isinstance(x, float) and pd.isna(x)) else normalize_json_field(x)
-        )
+        def to_string(v):
+            if pd.isna(v):
+                return None
+
+            normalized = normalize_json_field(v)
+
+            if normalized is None:
+                return None
+
+            return str(normalized)
+
+        return series.apply(to_string).astype("string")
 
     if bq_type == "INT64":
         return pd.to_numeric(series, errors="coerce").astype("Int64")
@@ -230,7 +238,7 @@ def cast_series_by_bq_type(series: pd.Series, bq_type: str) -> pd.Series:
 
     if bq_type == "BOOL":
         def to_bool(v):
-            if v is None or (isinstance(v, float) and pd.isna(v)):
+            if pd.isna(v):
                 return pd.NA
             if isinstance(v, bool):
                 return v
@@ -623,6 +631,13 @@ def run_etl():
             column_name_map=column_name_map,
             field_type_map=field_type_map,
         )
+
+        string_columns = [col for col, dtype in field_type_map.items() if dtype == "STRING"]
+        string_columns.extend(["source_system", "run_id", "record_hash"])
+
+        for col in string_columns:
+            if col in df.columns:
+                df[col] = df[col].apply(lambda v: None if pd.isna(v) else str(v)).astype("string")
 
         load_dataframe_in_chunks(
             client=client,
