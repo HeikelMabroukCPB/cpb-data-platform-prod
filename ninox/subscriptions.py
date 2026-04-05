@@ -34,8 +34,8 @@ TABLE_NAME = os.environ.get("TABLE_NAME", "generic")
 
 SOURCE_SYSTEM = os.environ.get("SOURCE_SYSTEM", "ninox")
 
-API_TOKEN = os.environ.get("API_TOKEN")
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.ninox.com/v1")
+NINOX_API_TOKEN = os.environ.get("NINOX_API_TOKEN")
+NINOX_API_BASE_URL = os.environ.get("NINOX_API_BASE_URL", "https://api.ninox.com/v1")
 
 NINOX_TEAM_ID = os.environ.get("NINOX_TEAM_ID")
 NINOX_DATABASE_ID = os.environ.get("NINOX_DATABASE_ID")
@@ -58,10 +58,10 @@ RAW_TABLE = f"{PROJECT_ID}.{DATASET_RAW}.{SOURCE_SYSTEM}_{TABLE_NAME}"
 META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 
 SCHEMA_URL = (
-    f"{API_BASE_URL}/teams/{NINOX_TEAM_ID}/databases/{NINOX_DATABASE_ID}/tables/{NINOX_TABLE_ID}"
+    f"{NINOX_API_BASE_URL}/teams/{NINOX_TEAM_ID}/databases/{NINOX_DATABASE_ID}/tables/{NINOX_TABLE_ID}"
 )
 RECORDS_URL = (
-    f"{API_BASE_URL}/teams/{NINOX_TEAM_ID}/databases/{NINOX_DATABASE_ID}/tables/{NINOX_TABLE_ID}/records"
+    f"{NINOX_API_BASE_URL}/teams/{NINOX_TEAM_ID}/databases/{NINOX_DATABASE_ID}/tables/{NINOX_TABLE_ID}/records"
 )
 
 TECHNICAL_COLUMNS = [
@@ -89,8 +89,8 @@ def validate_config() -> None:
         "PIPELINE_NAME": PIPELINE_NAME,
         "TABLE_NAME": TABLE_NAME,
         "SOURCE_SYSTEM": SOURCE_SYSTEM,
-        "API_TOKEN": API_TOKEN,
-        "API_BASE_URL": API_BASE_URL,
+        "NINOX_API_TOKEN": NINOX_API_TOKEN,
+        "NINOX_API_BASE_URL": NINOX_API_BASE_URL,
         "NINOX_TEAM_ID": NINOX_TEAM_ID,
         "NINOX_DATABASE_ID": NINOX_DATABASE_ID,
         "NINOX_TABLE_ID": NINOX_TABLE_ID,
@@ -124,7 +124,7 @@ def validate_config() -> None:
 
 def get_headers() -> dict:
     return {
-        "Authorization": f"Bearer {API_TOKEN}",
+        "Authorization": f"Bearer {NINOX_API_TOKEN}",
         "Accept": "application/json",
         "Content-Type": "application/json",
         "User-Agent": "cpb-data-platform/1.0",
