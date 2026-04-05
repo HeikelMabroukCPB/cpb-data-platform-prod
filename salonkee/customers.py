@@ -59,6 +59,9 @@ TABLE_SCHEMA = [
     bigquery.SchemaField("online_user_id", "STRING"),
     bigquery.SchemaField("salon_user_id", "STRING"),
     bigquery.SchemaField("prename", "STRING"),
+    bigquery.SchemaField("email", "STRING"),
+    bigquery.SchemaField("mobile", "STRING"),
+    bigquery.SchemaField("birthday", "DATE"),
     bigquery.SchemaField("name", "STRING"),
     bigquery.SchemaField("language", "STRING"),
     bigquery.SchemaField("gender", "STRING"),
@@ -75,6 +78,9 @@ SELECTED_COLUMNS = [
     "online_user_id",
     "salon_user_id",
     "prename",
+    "email",
+    "mobile",
+    "birthday",
     "name",
     "language",
     "gender",
@@ -218,9 +224,15 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     df["online_user_id"] = normalize_nullable_string(df["online_user_id"])
     df["salon_user_id"] = normalize_nullable_string(df["salon_user_id"])
     df["prename"] = normalize_nullable_string(df["prename"])
+    df["email"] = normalize_nullable_string(df["email"])
+    df["mobile"] = normalize_nullable_string(df["mobile"])
     df["name"] = normalize_nullable_string(df["name"])
     df["language"] = normalize_nullable_string(df["language"])
     df["gender"] = normalize_nullable_string(df["gender"])
+
+    birthday_raw = normalize_nullable_string(df["birthday"])
+    df["birthday"] = pd.to_datetime(birthday_raw, errors="coerce").dt.date
+
     df["created"] = pd.to_datetime(df["created"], errors="coerce", utc=True)
     df["salon_id"] = pd.to_numeric(df["salon_id"], errors="coerce").astype("Int64")
 
@@ -236,6 +248,10 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
             row.get("online_user_id"),
             row.get("salon_user_id"),
             row.get("prename"),
+            row.get("email"),
+            row.get("mobile"),
+            row.get("birthday"),
+            row.get("name"),
             row.get("language"),
             row.get("gender"),
             row.get("created"),
