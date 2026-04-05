@@ -170,11 +170,11 @@ def normalize_json_field(value):
     if value is None:
         return None
 
-    if pd.isna(value):
-        return None
-
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    if pd.api.types.is_scalar(value) and pd.isna(value):
+        return None
 
     return value
 
@@ -218,7 +218,13 @@ def map_ninox_type_to_bq(field_meta: dict) -> str:
 def cast_series_by_bq_type(series: pd.Series, bq_type: str) -> pd.Series:
     if bq_type == "STRING":
         def to_string(v):
-            if pd.isna(v):
+            if v is None:
+                return None
+
+            if isinstance(v, (dict, list)):
+                return json.dumps(v, ensure_ascii=False, sort_keys=True)
+
+            if pd.api.types.is_scalar(v) and pd.isna(v):
                 return None
 
             normalized = normalize_json_field(v)
@@ -238,7 +244,9 @@ def cast_series_by_bq_type(series: pd.Series, bq_type: str) -> pd.Series:
 
     if bq_type == "BOOL":
         def to_bool(v):
-            if pd.isna(v):
+            if v is None:
+                return pd.NA
+            if pd.api.types.is_scalar(v) and pd.isna(v):
                 return pd.NA
             if isinstance(v, bool):
                 return v
@@ -637,7 +645,18 @@ def run_etl():
 
         for col in string_columns:
             if col in df.columns:
-                df[col] = df[col].apply(lambda v: None if pd.isna(v) else str(v)).astype("string")
+                def final_stringify(v):
+                    if v is None:
+                        return None
+                    if isinstance(v, (dict, list)):
+                        return json.dumps(v, ensure_ascii=False, sort_keys=True)
+                    if pd.api.types.is_scalar(v) and pd.isna(v):
+                        return None
+                    return str(v)
+
+                df[col] = df[col].apply(final_stringify).astype("string")
+
+        logger.info(f"Dataframe dtypes before load: {df.dtypes.to_dict()}")
 
         load_dataframe_in_chunks(
             client=client,
