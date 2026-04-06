@@ -157,10 +157,7 @@ def extract_page_records(payload):
 
 
 def resolve_window_field() -> str:
-    window_field = INCREMENTAL_FIELD
-    if window_field.endswith("Since"):
-        window_field = window_field[:-5]
-    return window_field
+    return "created"
 
 
 def get_incremental_window_dates():
