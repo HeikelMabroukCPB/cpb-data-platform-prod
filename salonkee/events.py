@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import requests
@@ -156,6 +156,19 @@ def extract_page_records(payload):
     raise ValueError("Unsupported API response format")
 
 
+def resolve_window_field() -> str:
+    window_field = INCREMENTAL_FIELD
+    if window_field.endswith("Since"):
+        window_field = window_field[:-5]
+    return window_field
+
+
+def get_incremental_window_dates():
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=INCREMENTAL_LOOKBACK_DAYS)
+    return start_date, end_date
+
+
 def build_api_params():
     if LOAD_MODE == "full":
         return {}
@@ -176,20 +189,21 @@ def build_api_params():
     raise ValueError(f"Unsupported LOAD_MODE: {LOAD_MODE}")
 
 
-def delete_backfill_window(
+def delete_window(
     client: bigquery.Client,
     table_id: str,
     start_date: str,
     end_date: str,
+    window_field: str,
 ) -> None:
     logger.info(
-        f"Deleting existing rows from backfill window based on DATE(start) | "
-        f"table={table_id} | start_date={start_date} | end_date={end_date}"
+        f"Deleting existing rows from window | table={table_id} | "
+        f"window_field={window_field} | start_date={start_date} | end_date={end_date}"
     )
 
     query = f"""
     DELETE FROM `{table_id}`
-    WHERE DATE(start) BETWEEN @start_date AND @end_date
+    WHERE DATE({window_field}) BETWEEN @start_date AND @end_date
     """
 
     job_config = bigquery.QueryJobConfig(
@@ -200,29 +214,37 @@ def delete_backfill_window(
     )
 
     client.query(query, job_config=job_config).result()
-    logger.info("Backfill window delete completed")
+    logger.info("Window delete completed")
 
 
-def apply_backfill_window_filter(df: pd.DataFrame) -> pd.DataFrame:
-    if LOAD_MODE != "backfill":
-        return df
-
+def apply_window_filter(
+    df: pd.DataFrame,
+    start_date: str,
+    end_date: str,
+    window_field: str,
+) -> pd.DataFrame:
     logger.info(
-        f"Applying local backfill filter on start date | "
-        f"start_date={BACKFILL_START_DATE} | end_date={BACKFILL_END_DATE}"
+        f"Applying local window filter | "
+        f"window_field={window_field} | start_date={start_date} | end_date={end_date}"
     )
 
-    start_date = pd.to_datetime(BACKFILL_START_DATE).date()
-    end_date = pd.to_datetime(BACKFILL_END_DATE).date()
+    if window_field not in df.columns:
+        raise ValueError(
+            f"Window field '{window_field}' not found in dataframe. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    start_date = pd.to_datetime(start_date).date()
+    end_date = pd.to_datetime(end_date).date()
 
     filtered_df = df[
-        df["start"].notna() &
-        (df["start"].dt.date >= start_date) &
-        (df["start"].dt.date <= end_date)
+        df[window_field].notna() &
+        (df[window_field].dt.date >= start_date) &
+        (df[window_field].dt.date <= end_date)
     ].copy()
 
     logger.info(
-        f"Backfill window filter complete | rows_before={len(df)} | rows_after={len(filtered_df)}"
+        f"Window filter complete | rows_before={len(df)} | rows_after={len(filtered_df)}"
     )
     return filtered_df
 
@@ -389,19 +411,51 @@ def run_etl():
     try:
         validate_config()
 
+        window_field = resolve_window_field()
+        window_start = None
+        window_end = None
+
         if LOAD_MODE == "backfill" and WRITE_MODE == "replace_window":
-            delete_backfill_window(
+            window_start = BACKFILL_START_DATE
+            window_end = BACKFILL_END_DATE
+            delete_window(
                 client=client,
                 table_id=RAW_TABLE,
-                start_date=BACKFILL_START_DATE,
-                end_date=BACKFILL_END_DATE,
+                start_date=window_start,
+                end_date=window_end,
+                window_field=window_field,
+            )
+
+        if LOAD_MODE == "incremental" and WRITE_MODE == "replace_window":
+            incremental_start, incremental_end = get_incremental_window_dates()
+            window_start = incremental_start.isoformat()
+            window_end = incremental_end.isoformat()
+            delete_window(
+                client=client,
+                table_id=RAW_TABLE,
+                start_date=window_start,
+                end_date=window_end,
+                window_field=window_field,
             )
 
         raw_df = fetch_data()
         df = transform_dataframe(raw_df, run_id)
 
-        if LOAD_MODE == "backfill":
-            df = apply_backfill_window_filter(df)
+        if LOAD_MODE == "backfill" and WRITE_MODE == "replace_window":
+            df = apply_window_filter(
+                df=df,
+                start_date=window_start,
+                end_date=window_end,
+                window_field=window_field,
+            )
+
+        if LOAD_MODE == "incremental" and WRITE_MODE == "replace_window":
+            df = apply_window_filter(
+                df=df,
+                start_date=window_start,
+                end_date=window_end,
+                window_field=window_field,
+            )
 
         load_dataframe_in_chunks(
             client=client,
@@ -418,6 +472,8 @@ def run_etl():
         )
         if LOAD_MODE == "backfill":
             success_message += f" | window_on_start={BACKFILL_START_DATE} to {BACKFILL_END_DATE}"
+        if LOAD_MODE == "incremental" and WRITE_MODE == "replace_window":
+            success_message += f" | window={window_start} to {window_end}"
 
         log_pipeline_run(
             client=client,
@@ -444,6 +500,12 @@ def run_etl():
             error_message = (
                 f"{error_message} | load_mode={LOAD_MODE} | "
                 f"window_on_start={BACKFILL_START_DATE} to {BACKFILL_END_DATE}"
+            )
+        if LOAD_MODE == "incremental" and WRITE_MODE == "replace_window":
+            incremental_start, incremental_end = get_incremental_window_dates()
+            error_message = (
+                f"{error_message} | load_mode={LOAD_MODE} | write_mode={WRITE_MODE} | "
+                f"window={incremental_start.isoformat()} to {incremental_end.isoformat()}"
             )
 
         try:
