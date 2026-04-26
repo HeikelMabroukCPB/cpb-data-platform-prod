@@ -215,6 +215,7 @@ steps:
       - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
       - '--region'
       - 'europe-west1'
+
   # Update Cloud Run job: ninox diensten
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
@@ -227,6 +228,21 @@ steps:
       - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
       - '--region'
       - 'europe-west1'
+
+  # Update Cloud Run job: windsor meta ads
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'windsor-meta-ads'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+
 options:
   logging: CLOUD_LOGGING_ONLY
 
