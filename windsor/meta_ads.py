@@ -57,7 +57,7 @@ META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 
 
 # =================================
-# Windsor fields
+# Windsor fields - main Meta performance only
 # =================================
 
 WINDSOR_FIELDS = [
@@ -87,18 +87,8 @@ WINDSOR_FIELDS = [
     "reach",
     "spend",
     "thumbnail_url",
-    "unique_actions_link_click",
-    "unique_actions_post_engagement",
-    "unique_actions_video_view",
     "unique_clicks",
     "unique_ctr",
-    "unique_outbound_clicks_outbound_click",
-    "video_avg_time_watched_actions_video_view",
-    "video_p100_watched_actions_video_view",
-    "video_p25_watched_actions_video_view",
-    "video_p50_watched_actions_video_view",
-    "video_play_actions_video_view",
-    "video_thruplay_watched_actions_video_view",
 ]
 
 
@@ -141,19 +131,8 @@ TABLE_SCHEMA = [
     bigquery.SchemaField("spend", "FLOAT64"),
     bigquery.SchemaField("thumbnail_url", "STRING"),
 
-    bigquery.SchemaField("unique_actions_link_click", "INT64"),
-    bigquery.SchemaField("unique_actions_post_engagement", "INT64"),
-    bigquery.SchemaField("unique_actions_video_view", "INT64"),
     bigquery.SchemaField("unique_clicks", "INT64"),
     bigquery.SchemaField("unique_ctr", "FLOAT64"),
-    bigquery.SchemaField("unique_outbound_clicks_outbound_click", "INT64"),
-
-    bigquery.SchemaField("video_avg_time_watched_actions_video_view", "FLOAT64"),
-    bigquery.SchemaField("video_p100_watched_actions_video_view", "INT64"),
-    bigquery.SchemaField("video_p25_watched_actions_video_view", "INT64"),
-    bigquery.SchemaField("video_p50_watched_actions_video_view", "INT64"),
-    bigquery.SchemaField("video_play_actions_video_view", "INT64"),
-    bigquery.SchemaField("video_thruplay_watched_actions_video_view", "INT64"),
 
     bigquery.SchemaField("source_system", "STRING"),
     bigquery.SchemaField("run_id", "STRING"),
@@ -480,16 +459,7 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
         "link_clicks",
         "outbound_clicks_outbound_click",
         "reach",
-        "unique_actions_link_click",
-        "unique_actions_post_engagement",
-        "unique_actions_video_view",
         "unique_clicks",
-        "unique_outbound_clicks_outbound_click",
-        "video_p100_watched_actions_video_view",
-        "video_p25_watched_actions_video_view",
-        "video_p50_watched_actions_video_view",
-        "video_play_actions_video_view",
-        "video_thruplay_watched_actions_video_view",
     ]
 
     float_columns = [
@@ -499,7 +469,6 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
         "frequency",
         "spend",
         "unique_ctr",
-        "video_avg_time_watched_actions_video_view",
     ]
 
     for col in string_columns:
@@ -549,18 +518,8 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
             row.get("reach"),
             row.get("spend"),
             row.get("thumbnail_url"),
-            row.get("unique_actions_link_click"),
-            row.get("unique_actions_post_engagement"),
-            row.get("unique_actions_video_view"),
             row.get("unique_clicks"),
             row.get("unique_ctr"),
-            row.get("unique_outbound_clicks_outbound_click"),
-            row.get("video_avg_time_watched_actions_video_view"),
-            row.get("video_p100_watched_actions_video_view"),
-            row.get("video_p25_watched_actions_video_view"),
-            row.get("video_p50_watched_actions_video_view"),
-            row.get("video_play_actions_video_view"),
-            row.get("video_thruplay_watched_actions_video_view"),
         ),
         axis=1,
     )
