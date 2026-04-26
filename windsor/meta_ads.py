@@ -57,7 +57,7 @@ META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 
 
 # =================================
-# Windsor fields - main Meta performance only
+# Windsor fields - main Meta performance + leads/engagement
 # =================================
 
 WINDSOR_FIELDS = [
@@ -89,6 +89,8 @@ WINDSOR_FIELDS = [
     "thumbnail_url",
     "unique_clicks",
     "unique_ctr",
+    "post_engagement",
+    "leads",
 ]
 
 
@@ -133,6 +135,9 @@ TABLE_SCHEMA = [
 
     bigquery.SchemaField("unique_clicks", "INT64"),
     bigquery.SchemaField("unique_ctr", "FLOAT64"),
+
+    bigquery.SchemaField("post_engagement", "INT64"),
+    bigquery.SchemaField("leads", "INT64"),
 
     bigquery.SchemaField("source_system", "STRING"),
     bigquery.SchemaField("run_id", "STRING"),
@@ -460,6 +465,8 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
         "outbound_clicks_outbound_click",
         "reach",
         "unique_clicks",
+        "post_engagement",
+        "leads",
     ]
 
     float_columns = [
@@ -520,6 +527,8 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
             row.get("thumbnail_url"),
             row.get("unique_clicks"),
             row.get("unique_ctr"),
+            row.get("post_engagement"),
+            row.get("leads"),
         ),
         axis=1,
     )
