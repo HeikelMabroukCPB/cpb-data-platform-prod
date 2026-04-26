@@ -406,6 +406,16 @@ def fetch_data() -> pd.DataFrame:
             records = extract_page_records(data)
             df = pd.json_normalize(records)
 
+            if not df.empty and "date" in df.columns:
+                date_series = pd.to_datetime(df["date"], errors="coerce")
+
+                logger.info(
+                    f"Windsor response date range | "
+                    f"min_date={date_series.min()} | "
+                    f"max_date={date_series.max()} | "
+                    f"distinct_dates={date_series.dt.date.nunique()}"
+                )
+
             logger.info(f"Fetched {len(df)} rows from Windsor API")
             logger.info(f"Columns received: {list(df.columns)}")
 
