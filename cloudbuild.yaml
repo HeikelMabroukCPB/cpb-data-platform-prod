@@ -112,14 +112,14 @@ steps:
       - '--region'
       - 'europe-west1'
 
-  # Update Cloud Run job: sharepoint list
+  # Update Cloud Run job: sharepoint-list-service-map
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
       - 'jobs'
       - 'update'
-      - 'sharepoint-list'
+      - 'sharepoint-list-service-map'
       - '--image'
       - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
       - '--region'
@@ -237,6 +237,19 @@ steps:
       - 'jobs'
       - 'update'
       - 'windsor-meta-ads'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: sharepoint-list-campaign-map
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'sharepoint-list-campaign-map'
       - '--image'
       - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
       - '--region'
