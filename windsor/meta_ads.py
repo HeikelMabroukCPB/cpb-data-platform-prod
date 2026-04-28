@@ -57,8 +57,8 @@ META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 
 
 # =================================
-# Windsor fields - main Meta performance + leads/engagement
-# API field names from Windsor
+# Windsor fields
+# These are the real API field names from Windsor
 # =================================
 
 WINDSOR_FIELDS = [
@@ -92,12 +92,13 @@ WINDSOR_FIELDS = [
     "unique_ctr",
     "actions_post_engagement",
     "actions_lead",
+    "actions_landing_page_view",
 ]
 
 
 # =================================
 # BigQuery columns
-# Keep old BigQuery names so no downstream changes are needed
+# Keep existing raw naming, except new landing_page_view column
 # =================================
 
 BIGQUERY_COLUMNS = [
@@ -131,12 +132,13 @@ BIGQUERY_COLUMNS = [
     "unique_ctr",
     "post_engagement",
     "leads",
+    "landing_page_views",
 ]
 
 
 # =================================
 # Table schema
-# Raw = keep existing BigQuery column names
+# Raw = existing BigQuery column names
 # =================================
 
 TABLE_SCHEMA = [
@@ -178,6 +180,7 @@ TABLE_SCHEMA = [
 
     bigquery.SchemaField("post_engagement", "INT64"),
     bigquery.SchemaField("leads", "INT64"),
+    bigquery.SchemaField("landing_page_views", "INT64"),
 
     bigquery.SchemaField("source_system", "STRING"),
     bigquery.SchemaField("run_id", "STRING"),
@@ -467,6 +470,22 @@ def fetch_data() -> pd.DataFrame:
             else:
                 logger.warning("actions_post_engagement column was not returned by Windsor")
 
+            if "actions_landing_page_view" in df.columns:
+                logger.info(
+                    f"actions_landing_page_view raw sample: "
+                    f"{df['actions_landing_page_view'].head(20).tolist()}"
+                )
+                logger.info(
+                    f"actions_landing_page_view non-null count: "
+                    f"{df['actions_landing_page_view'].notna().sum()} / {len(df)}"
+                )
+                logger.info(
+                    f"actions_landing_page_view unique sample: "
+                    f"{df['actions_landing_page_view'].dropna().unique()[:20]}"
+                )
+            else:
+                logger.warning("actions_landing_page_view column was not returned by Windsor")
+
             return df
 
         except requests.exceptions.HTTPError as e:
@@ -505,13 +524,14 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     # Select Windsor API columns first
     df = df[SELECTED_COLUMNS].copy()
 
-    # Rename Windsor API fields back to the existing BigQuery column names
+    # Rename Windsor API fields to BigQuery/reporting-friendly names
     df = df.rename(columns={
         "actions_post_engagement": "post_engagement",
         "actions_lead": "leads",
+        "actions_landing_page_view": "landing_page_views",
     })
 
-    # Force final dataframe to match the existing BigQuery raw table structure
+    # Force final dataframe to match the BigQuery raw table structure
     df = df[BIGQUERY_COLUMNS].copy()
 
     string_columns = [
@@ -541,6 +561,7 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
         "unique_clicks",
         "post_engagement",
         "leads",
+        "landing_page_views",
     ]
 
     float_columns = [
@@ -603,6 +624,7 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
             row.get("unique_ctr"),
             row.get("post_engagement"),
             row.get("leads"),
+            row.get("landing_page_views"),
         ),
         axis=1,
     )
