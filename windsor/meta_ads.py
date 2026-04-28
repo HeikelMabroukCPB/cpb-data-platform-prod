@@ -58,9 +58,49 @@ META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 
 # =================================
 # Windsor fields - main Meta performance + leads/engagement
+# API field names from Windsor
 # =================================
 
 WINDSOR_FIELDS = [
+    "account_name",
+    "ad_id",
+    "ad_name",
+    "ad_object_type",
+    "adcontent",
+    "adset_id",
+    "adset_name",
+    "adset_status",
+    "campaign",
+    "campaign_id",
+    "campaign_status",
+    "clicks",
+    "cpc",
+    "cpm",
+    "ctr",
+    "datasource",
+    "date",
+    "device_platform",
+    "frequency",
+    "impressions",
+    "link_clicks",
+    "outbound_clicks_outbound_click",
+    "publisher_platform",
+    "reach",
+    "spend",
+    "thumbnail_url",
+    "unique_clicks",
+    "unique_ctr",
+    "actions_post_engagement",
+    "actions_lead",
+]
+
+
+# =================================
+# BigQuery columns
+# Keep old BigQuery names so no downstream changes are needed
+# =================================
+
+BIGQUERY_COLUMNS = [
     "account_name",
     "ad_id",
     "ad_name",
@@ -96,7 +136,7 @@ WINDSOR_FIELDS = [
 
 # =================================
 # Table schema
-# Raw = keep Windsor source names as-is
+# Raw = keep existing BigQuery column names
 # =================================
 
 TABLE_SCHEMA = [
@@ -388,6 +428,11 @@ def fetch_data() -> pd.DataFrame:
 
             data = response.json()
             records = extract_page_records(data)
+
+            if not records:
+                logger.warning("Windsor API returned zero records")
+                return pd.DataFrame(columns=SELECTED_COLUMNS)
+
             df = pd.json_normalize(records)
 
             if not df.empty and "date" in df.columns:
@@ -402,6 +447,25 @@ def fetch_data() -> pd.DataFrame:
 
             logger.info(f"Fetched {len(df)} rows from Windsor API")
             logger.info(f"Columns received: {list(df.columns)}")
+
+            if "actions_lead" in df.columns:
+                logger.info(f"actions_lead raw sample: {df['actions_lead'].head(20).tolist()}")
+                logger.info(f"actions_lead non-null count: {df['actions_lead'].notna().sum()} / {len(df)}")
+                logger.info(f"actions_lead unique sample: {df['actions_lead'].dropna().unique()[:20]}")
+            else:
+                logger.warning("actions_lead column was not returned by Windsor")
+
+            if "actions_post_engagement" in df.columns:
+                logger.info(
+                    f"actions_post_engagement raw sample: "
+                    f"{df['actions_post_engagement'].head(20).tolist()}"
+                )
+                logger.info(
+                    f"actions_post_engagement non-null count: "
+                    f"{df['actions_post_engagement'].notna().sum()} / {len(df)}"
+                )
+            else:
+                logger.warning("actions_post_engagement column was not returned by Windsor")
 
             return df
 
@@ -438,7 +502,17 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
             f"Available columns: {list(df.columns)}"
         )
 
+    # Select Windsor API columns first
     df = df[SELECTED_COLUMNS].copy()
+
+    # Rename Windsor API fields back to the existing BigQuery column names
+    df = df.rename(columns={
+        "actions_post_engagement": "post_engagement",
+        "actions_lead": "leads",
+    })
+
+    # Force final dataframe to match the existing BigQuery raw table structure
+    df = df[BIGQUERY_COLUMNS].copy()
 
     string_columns = [
         "account_name",
