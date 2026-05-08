@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # =================================
 
 PROJECT_ID = os.environ.get("PROJECT_ID", "cpb-data-platform-prod")
-DATASET_RAW = os.environ.get("DATASET_RAW", "cpb_raw")
+DATASET_RAW = os.environ.get("DATASET_RAW", "cpb_raW")
 DATASET_META = os.environ.get("DATASET_META", "cpb_meta")
 
 PIPELINE_NAME = os.environ.get("PIPELINE_NAME", "ninox_generic")
