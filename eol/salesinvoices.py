@@ -224,21 +224,28 @@ def normalize_value(value):
     return value
 
 
+def to_raw_string(value):
+    """
+    Converts any SQL Server value to a safe raw-layer string.
+    Keeps nulls as null.
+    """
+    value = normalize_value(value)
+
+    if value is None:
+        return None
+
+    if pd.api.types.is_scalar(value) and pd.isna(value):
+        return None
+
+    return str(value)
+
+
 def infer_bq_type(series: pd.Series) -> str:
-    dtype = series.dtype
-
-    if pd.api.types.is_bool_dtype(dtype):
-        return "BOOL"
-
-    if pd.api.types.is_integer_dtype(dtype):
-        return "INT64"
-
-    if pd.api.types.is_float_dtype(dtype):
-        return "FLOAT64"
-
-    if pd.api.types.is_datetime64_any_dtype(dtype):
-        return "TIMESTAMP"
-
+    """
+    Raw-layer strategy:
+    all SQL Server source columns are stored as STRING.
+    Type casting happens later in cpb_prep.
+    """
     return "STRING"
 
 
@@ -249,8 +256,7 @@ def build_table_schema(df: pd.DataFrame) -> list[bigquery.SchemaField]:
         if col in TECHNICAL_COLUMNS:
             continue
 
-        bq_type = infer_bq_type(df[col])
-        schema.append(bigquery.SchemaField(col, bq_type))
+        schema.append(bigquery.SchemaField(col, "STRING"))
 
     schema.extend([
         bigquery.SchemaField("source_system", "STRING"),
@@ -267,12 +273,6 @@ def align_dataframe_to_schema(
     df: pd.DataFrame,
     schema: list[bigquery.SchemaField],
 ) -> pd.DataFrame:
-    """
-    Ensures every chunk has the same dtypes as the first chunk schema.
-    This prevents pyarrow errors like:
-    object of type <class 'str'> cannot be converted to int.
-    """
-
     df = df.copy()
 
     for field in schema:
@@ -282,11 +282,13 @@ def align_dataframe_to_schema(
             df[col] = None
 
         if field.field_type == "STRING":
-            df[col] = df[col].apply(
-                lambda v: None
-                if v is None or (pd.api.types.is_scalar(v) and pd.isna(v))
-                else str(v)
-            ).astype("string")
+            df[col] = df[col].apply(to_raw_string).astype("string")
+
+        elif field.field_type == "TIMESTAMP":
+            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+
+        elif field.field_type == "DATE":
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
         elif field.field_type == "INT64":
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
@@ -296,12 +298,6 @@ def align_dataframe_to_schema(
 
         elif field.field_type == "BOOL":
             df[col] = df[col].astype("boolean")
-
-        elif field.field_type == "TIMESTAMP":
-            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
-
-        elif field.field_type == "DATE":
-            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
     schema_columns = [field.name for field in schema]
     df = df[schema_columns].copy()
@@ -388,9 +384,11 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
 
     logger.info(f"Column mapping: {rename_map}")
 
-    for col in df.columns:
-        if df[col].dtype == "object":
-            df[col] = df[col].apply(normalize_value)
+    # Convert all SQL Server source columns to STRING for raw layer
+    source_columns = list(df.columns)
+
+    for col in source_columns:
+        df[col] = df[col].apply(to_raw_string).astype("string")
 
     load_timestamp = datetime.utcnow()
     load_date = load_timestamp.date()
@@ -400,25 +398,17 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     df["load_timestamp"] = load_timestamp
     df["load_date"] = load_date
 
-    hash_columns = [col for col in df.columns if col not in TECHNICAL_COLUMNS]
+    hash_columns = source_columns
 
     df["record_hash"] = df.apply(
         lambda row: generate_record_hash_from_values(
             *[row.get(col) for col in hash_columns]
         ),
         axis=1,
-    )
+    ).astype("string")
 
     final_columns = hash_columns + TECHNICAL_COLUMNS
     df = df[final_columns].copy()
-
-    for col in df.columns:
-        if df[col].dtype == "object":
-            df[col] = df[col].apply(
-                lambda v: None
-                if v is None or (pd.api.types.is_scalar(v) and pd.isna(v))
-                else str(v)
-            ).astype("string")
 
     logger.info(f"Transformation complete | rows={len(df)} | columns={len(df.columns)}")
     logger.info(f"Dataframe dtypes before schema alignment: {df.dtypes.to_dict()}")
