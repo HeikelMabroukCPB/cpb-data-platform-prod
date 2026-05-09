@@ -1,4 +1,3 @@
-import hashlib
 import json
 import logging
 import os
@@ -42,26 +41,19 @@ SQLSERVER_PASSWORD = os.environ.get("SQLSERVER_PASSWORD")
 SQLSERVER_SCHEMA = os.environ.get("SQLSERVER_SCHEMA", "dbo")
 SQLSERVER_TABLE = os.environ.get("SQLSERVER_TABLE")
 
-# Optional custom query.
-# If provided, this query is used instead of SELECT * FROM schema.table.
-# Example:
-# SELECT id, name, modified_at FROM dbo.Customers
 SQL_QUERY = os.environ.get("SQL_QUERY")
-
-# Date/datetime column used for incremental and backfill filtering.
-# Example: modified_at, updated_at, invoice_date, created_at
 WINDOW_FIELD = os.environ.get("WINDOW_FIELD")
 
-LOAD_MODE = os.environ.get("LOAD_MODE", "full").lower()  # full | incremental | backfill
+LOAD_MODE = os.environ.get("LOAD_MODE", "full").lower()
 INCREMENTAL_LOOKBACK_DAYS = int(os.environ.get("INCREMENTAL_LOOKBACK_DAYS", 2))
 
 BACKFILL_START_DATE = os.environ.get("BACKFILL_START_DATE")
 BACKFILL_END_DATE = os.environ.get("BACKFILL_END_DATE")
 
-WRITE_MODE = os.environ.get("WRITE_MODE", "append").lower()  # append | replace_window
+WRITE_MODE = os.environ.get("WRITE_MODE", "append").lower()
 
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 5000))
-SQL_CHUNK_SIZE = int(os.environ.get("SQL_CHUNK_SIZE", 50000))
+SQL_CHUNK_SIZE = int(os.environ.get("SQL_CHUNK_SIZE", 10000))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 3))
 
 RAW_TABLE = f"{PROJECT_ID}.{DATASET_RAW}.{SOURCE_SYSTEM}_{TABLE_NAME}"
@@ -161,11 +153,6 @@ def make_unique_columns(columns: list[str]) -> list[str]:
 
 
 def get_sqlserver_engine():
-    """
-    Uses ODBC Driver 18 for SQL Server.
-    Your Docker image must install msodbcsql18 and pyodbc.
-    """
-
     connection_string = (
         "DRIVER={ODBC Driver 18 for SQL Server};"
         f"SERVER={SQLSERVER_HOST},{SQLSERVER_PORT};"
@@ -179,13 +166,11 @@ def get_sqlserver_engine():
 
     encoded = quote_plus(connection_string)
 
-    engine = create_engine(
+    return create_engine(
         f"mssql+pyodbc:///?odbc_connect={encoded}",
         fast_executemany=True,
         pool_pre_ping=True,
     )
-
-    return engine
 
 
 def build_incremental_dates() -> tuple[str, str]:
@@ -196,10 +181,6 @@ def build_incremental_dates() -> tuple[str, str]:
 
 
 def build_source_query() -> tuple[str, dict]:
-    """
-    Builds SQL query for full, incremental, or backfill mode.
-    """
-
     params = {}
 
     if SQL_QUERY:
@@ -282,6 +263,52 @@ def build_table_schema(df: pd.DataFrame) -> list[bigquery.SchemaField]:
     return schema
 
 
+def align_dataframe_to_schema(
+    df: pd.DataFrame,
+    schema: list[bigquery.SchemaField],
+) -> pd.DataFrame:
+    """
+    Ensures every chunk has the same dtypes as the first chunk schema.
+    This prevents pyarrow errors like:
+    object of type <class 'str'> cannot be converted to int.
+    """
+
+    df = df.copy()
+
+    for field in schema:
+        col = field.name
+
+        if col not in df.columns:
+            df[col] = None
+
+        if field.field_type == "STRING":
+            df[col] = df[col].apply(
+                lambda v: None
+                if v is None or (pd.api.types.is_scalar(v) and pd.isna(v))
+                else str(v)
+            ).astype("string")
+
+        elif field.field_type == "INT64":
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+
+        elif field.field_type == "FLOAT64":
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        elif field.field_type == "BOOL":
+            df[col] = df[col].astype("boolean")
+
+        elif field.field_type == "TIMESTAMP":
+            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+
+        elif field.field_type == "DATE":
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+
+    schema_columns = [field.name for field in schema]
+    df = df[schema_columns].copy()
+
+    return df
+
+
 def delete_bq_window(client: bigquery.Client, table_id: str, start_date: str, end_date: str) -> None:
     logger.info(
         f"Deleting existing rows from BigQuery window | table={table_id} | "
@@ -308,15 +335,14 @@ def delete_bq_window(client: bigquery.Client, table_id: str, start_date: str, en
 # Fetch
 # =================================
 
-def fetch_data() -> pd.DataFrame:
+def fetch_sql_chunks():
     query, params = build_source_query()
 
-    logger.info(f"Fetching data from SQL Server | load_mode={LOAD_MODE}")
+    logger.info(f"Fetching data from SQL Server in chunks | load_mode={LOAD_MODE}")
     logger.info(f"SQL params: {params}")
+    logger.info(f"SQL_CHUNK_SIZE={SQL_CHUNK_SIZE}")
 
     engine = get_sqlserver_engine()
-
-    all_chunks = []
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -330,7 +356,7 @@ def fetch_data() -> pd.DataFrame:
 
                 for chunk in chunks:
                     logger.info(f"Fetched SQL chunk | rows={len(chunk)}")
-                    all_chunks.append(chunk)
+                    yield chunk
 
             break
 
@@ -342,27 +368,16 @@ def fetch_data() -> pd.DataFrame:
 
             time.sleep(5)
 
-    if not all_chunks:
-        logger.info("No rows returned from SQL Server")
-        return pd.DataFrame()
-
-    df = pd.concat(all_chunks, ignore_index=True)
-
-    logger.info(f"Fetched total rows from SQL Server | rows={len(df)}")
-    logger.info(f"Columns received: {list(df.columns)}")
-
-    return df
-
 
 # =================================
 # Transform
 # =================================
 
 def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
-    logger.info("Transforming SQL Server dataframe for raw layer")
+    logger.info("Transforming SQL Server dataframe chunk for raw layer")
 
     if df.empty:
-        logger.info("No SQL Server rows returned")
+        logger.info("Empty SQL Server chunk")
         return df
 
     original_columns = list(df.columns)
@@ -373,7 +388,6 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
 
     logger.info(f"Column mapping: {rename_map}")
 
-    # Normalize object columns
     for col in df.columns:
         if df[col].dtype == "object":
             df[col] = df[col].apply(normalize_value)
@@ -398,15 +412,16 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     final_columns = hash_columns + TECHNICAL_COLUMNS
     df = df[final_columns].copy()
 
-    # Final STRING cleanup
     for col in df.columns:
         if df[col].dtype == "object":
             df[col] = df[col].apply(
-                lambda v: None if v is None or (pd.api.types.is_scalar(v) and pd.isna(v)) else str(v)
+                lambda v: None
+                if v is None or (pd.api.types.is_scalar(v) and pd.isna(v))
+                else str(v)
             ).astype("string")
 
     logger.info(f"Transformation complete | rows={len(df)} | columns={len(df.columns)}")
-    logger.info(f"Dataframe dtypes before load: {df.dtypes.to_dict()}")
+    logger.info(f"Dataframe dtypes before schema alignment: {df.dtypes.to_dict()}")
 
     return df
 
@@ -446,27 +461,47 @@ def run_etl():
                 end_date=end_date,
             )
 
-        raw_df = fetch_data()
-        df = transform_dataframe(raw_df, run_id=run_id)
+        total_rows_loaded = 0
+        table_schema = None
+        chunk_number = 0
 
-        if df.empty:
-            table_schema = [
-                bigquery.SchemaField("source_system", "STRING"),
-                bigquery.SchemaField("run_id", "STRING"),
-                bigquery.SchemaField("load_timestamp", "TIMESTAMP"),
-                bigquery.SchemaField("load_date", "DATE"),
-                bigquery.SchemaField("record_hash", "STRING"),
-            ]
-        else:
-            table_schema = build_table_schema(df)
+        for raw_chunk in fetch_sql_chunks():
+            chunk_number += 1
 
-        load_dataframe_in_chunks(
-            client=client,
-            df=df,
-            table_id=RAW_TABLE,
-            schema=table_schema,
-            chunk_size=CHUNK_SIZE,
-        )
+            df_chunk = transform_dataframe(raw_chunk, run_id=run_id)
+
+            if df_chunk.empty:
+                logger.info(f"Skipping empty chunk | chunk_number={chunk_number}")
+                continue
+
+            if table_schema is None:
+                table_schema = build_table_schema(df_chunk)
+                logger.info(
+                    f"Schema created from first chunk: "
+                    f"{[(field.name, field.field_type) for field in table_schema]}"
+                )
+
+            df_chunk = align_dataframe_to_schema(df_chunk, table_schema)
+
+            logger.info(f"Dataframe dtypes before load: {df_chunk.dtypes.to_dict()}")
+
+            load_dataframe_in_chunks(
+                client=client,
+                df=df_chunk,
+                table_id=RAW_TABLE,
+                schema=table_schema,
+                chunk_size=CHUNK_SIZE,
+            )
+
+            total_rows_loaded += len(df_chunk)
+
+            logger.info(
+                f"Chunk loaded successfully | chunk_number={chunk_number} | "
+                f"chunk_rows={len(df_chunk)} | total_rows_loaded={total_rows_loaded}"
+            )
+
+        if table_schema is None:
+            logger.info("No rows returned from SQL Server. No data loaded.")
 
         finished_at = datetime.utcnow()
 
@@ -483,19 +518,20 @@ def run_etl():
             pipeline_name=PIPELINE_NAME,
             run_id=run_id,
             status="SUCCESS",
-            rows_loaded=len(df),
+            rows_loaded=total_rows_loaded,
             started_at=started_at,
             finished_at=finished_at,
             message=success_message,
         )
 
-        logger.info(f"Pipeline finished successfully | rows_loaded={len(df)} | run_id={run_id}")
+        logger.info(
+            f"Pipeline finished successfully | rows_loaded={total_rows_loaded} | run_id={run_id}"
+        )
 
-        return f"{len(df)} rows loaded into {RAW_TABLE}", 200
+        return f"{total_rows_loaded} rows loaded into {RAW_TABLE}", 200
 
     except Exception as e:
         finished_at = datetime.utcnow()
-
         error_message = str(e)
 
         try:
