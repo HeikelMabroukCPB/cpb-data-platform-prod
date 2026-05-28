@@ -514,6 +514,45 @@ steps:
       - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
       - '--region'
       - 'europe-west1'
+
+  # Update Cloud Run job: eol-exl-items
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'eol-exl-items'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: eol-salesorders
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'eol-salesorders'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: eol-salesorderlines
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'eol-salesorderlines'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
 options:
   logging: CLOUD_LOGGING_ONLY
 
