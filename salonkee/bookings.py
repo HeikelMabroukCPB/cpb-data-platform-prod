@@ -30,8 +30,8 @@ PROJECT_ID = os.environ.get("PROJECT_ID", "cpb-data-platform-prod")
 DATASET_RAW = os.environ.get("DATASET_RAW", "cpb_raw")
 DATASET_META = os.environ.get("DATASET_META", "cpb_meta")
 
-PIPELINE_NAME = os.environ.get("PIPELINE_NAME", "salonkee_sales")
-TABLE_NAME = os.environ.get("TABLE_NAME", "sales")
+PIPELINE_NAME = os.environ.get("PIPELINE_NAME", "salonkee_bookings")
+TABLE_NAME = os.environ.get("TABLE_NAME", "bookings")
 
 API_URL = os.environ.get("API_URL")
 API_TOKEN = os.environ.get("API_TOKEN")
@@ -61,22 +61,15 @@ META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 # =================================
 
 TABLE_SCHEMA = [
-    bigquery.SchemaField("transaction_id", "INT64"),
-    bigquery.SchemaField("customer_id", "STRING"),
-    bigquery.SchemaField("employee_id", "INT64"),
-    bigquery.SchemaField("entry_id", "INT64"),
-    bigquery.SchemaField("entry_name", "STRING"),
-    bigquery.SchemaField("salon_id", "INT64"),
-    bigquery.SchemaField("service_group_id", "INT64"),
-    bigquery.SchemaField("type", "STRING"),
-    bigquery.SchemaField("is_deposit", "BOOL"),
-    bigquery.SchemaField("deposit_transaction_id", "INT64"),
-    bigquery.SchemaField("price", "FLOAT64"),
-    bigquery.SchemaField("price_before_discount", "FLOAT64"),
+    bigquery.SchemaField("booking_id", "INT64"),
+    bigquery.SchemaField("date", "TIMESTAMP"),
+    bigquery.SchemaField("notAttended", "INT64"),
     bigquery.SchemaField("created", "TIMESTAMP"),
-    bigquery.SchemaField("is_cancelled", "BOOL"),
-    bigquery.SchemaField("cancelled_transaction_id", "INT64"),
-    bigquery.SchemaField("voucher_info", "STRING"),
+    bigquery.SchemaField("updated", "TIMESTAMP"),
+    bigquery.SchemaField("isOnlineBooking", "INT64"),
+    bigquery.SchemaField("salon_id", "INT64"),
+    bigquery.SchemaField("customer_id", "STRING"),
+
     bigquery.SchemaField("source_system", "STRING"),
     bigquery.SchemaField("run_id", "STRING"),
     bigquery.SchemaField("load_timestamp", "TIMESTAMP"),
@@ -85,22 +78,14 @@ TABLE_SCHEMA = [
 ]
 
 SELECTED_COLUMNS = [
-    "transaction_id",
-    "customer_id",
-    "employee_id",
-    "entry_id",
-    "entry_name",
-    "salon_id",
-    "service_group_id",
-    "type",
-    "is_deposit",
-    "deposit_transaction_id",
-    "price",
-    "price_before_discount",
+    "booking_id",
+    "date",
+    "notAttended",
     "created",
-    "is_cancelled",
-    "cancelled_transaction_id",
-    "voucher_info",
+    "updated",
+    "isOnlineBooking",
+    "salon_id",
+    "customer_id",
 ]
 
 
@@ -152,6 +137,7 @@ def extract_page_records(payload):
     if isinstance(payload, dict):
         if "data" in payload and isinstance(payload["data"], list):
             return payload["data"]
+
         return [payload]
 
     raise ValueError("Unsupported API response format")
@@ -168,7 +154,11 @@ def normalize_json_field(value):
 
 
 def resolve_window_field() -> str:
-    return "created"
+    """
+    For bookings, use updated as the replace_window field.
+    This is best for incremental refreshes because changed bookings will be replaced.
+    """
+    return "updated"
 
 
 def get_incremental_window_dates():
@@ -246,12 +236,15 @@ def apply_window_filter(
     end_date = pd.to_datetime(end_date).date()
 
     filtered_df = df[
-        df[window_field].notna() &
-        (df[window_field].dt.date >= start_date) &
-        (df[window_field].dt.date <= end_date)
+        df[window_field].notna()
+        & (df[window_field].dt.date >= start_date)
+        & (df[window_field].dt.date <= end_date)
     ].copy()
 
-    logger.info(f"Window filter complete | rows_before={len(df)} | rows_after={len(filtered_df)}")
+    logger.info(
+        f"Window filter complete | rows_before={len(df)} | rows_after={len(filtered_df)}"
+    )
+
     return filtered_df
 
 
@@ -282,6 +275,7 @@ def fetch_data() -> pd.DataFrame:
 
             if response.status_code == 429:
                 retry_after = response.headers.get("Retry-After")
+
                 wait_seconds = (
                     int(retry_after)
                     if retry_after and retry_after.isdigit()
@@ -339,6 +333,7 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     logger.info("Transforming dataframe for raw layer")
 
     missing_cols = [col for col in SELECTED_COLUMNS if col not in df.columns]
+
     if missing_cols:
         raise ValueError(
             f"Missing expected raw columns: {missing_cols}. "
@@ -347,22 +342,18 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
 
     df = df[SELECTED_COLUMNS].copy()
 
-    df["transaction_id"] = pd.to_numeric(df["transaction_id"], errors="coerce").astype("Int64")
-    df["customer_id"] = normalize_nullable_string(df["customer_id"])
-    df["employee_id"] = pd.to_numeric(df["employee_id"], errors="coerce").astype("Int64")
-    df["entry_id"] = pd.to_numeric(df["entry_id"], errors="coerce").astype("Int64")
-    df["entry_name"] = normalize_nullable_string(df["entry_name"])
-    df["salon_id"] = pd.to_numeric(df["salon_id"], errors="coerce").astype("Int64")
-    df["service_group_id"] = pd.to_numeric(df["service_group_id"], errors="coerce").astype("Int64")
-    df["type"] = normalize_nullable_string(df["type"])
-    df["is_deposit"] = df["is_deposit"].astype("boolean")
-    df["deposit_transaction_id"] = pd.to_numeric(df["deposit_transaction_id"], errors="coerce").astype("Int64")
-    df["price"] = pd.to_numeric(df["price"], errors="coerce")
-    df["price_before_discount"] = pd.to_numeric(df["price_before_discount"], errors="coerce")
+    df["booking_id"] = pd.to_numeric(df["booking_id"], errors="coerce").astype("Int64")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=True)
+
+    df["notAttended"] = pd.to_numeric(df["notAttended"], errors="coerce").astype("Int64")
+
     df["created"] = pd.to_datetime(df["created"], errors="coerce", utc=True)
-    df["is_cancelled"] = df["is_cancelled"].astype("boolean")
-    df["cancelled_transaction_id"] = pd.to_numeric(df["cancelled_transaction_id"], errors="coerce").astype("Int64")
-    df["voucher_info"] = df["voucher_info"].apply(normalize_json_field)
+    df["updated"] = pd.to_datetime(df["updated"], errors="coerce", utc=True)
+
+    df["isOnlineBooking"] = pd.to_numeric(df["isOnlineBooking"], errors="coerce").astype("Int64")
+
+    df["salon_id"] = pd.to_numeric(df["salon_id"], errors="coerce").astype("Int64")
+    df["customer_id"] = normalize_nullable_string(df["customer_id"])
 
     load_timestamp = datetime.utcnow()
     load_date = load_timestamp.date()
@@ -371,29 +362,23 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     df["run_id"] = run_id
     df["load_timestamp"] = load_timestamp
     df["load_date"] = load_date
+
     df["record_hash"] = df.apply(
         lambda row: generate_record_hash_from_values(
-            row.get("transaction_id"),
-            row.get("customer_id"),
-            row.get("employee_id"),
-            row.get("entry_id"),
-            row.get("entry_name"),
-            row.get("salon_id"),
-            row.get("service_group_id"),
-            row.get("type"),
-            row.get("is_deposit"),
-            row.get("deposit_transaction_id"),
-            row.get("price"),
-            row.get("price_before_discount"),
+            row.get("booking_id"),
+            row.get("date"),
+            row.get("notAttended"),
             row.get("created"),
-            row.get("is_cancelled"),
-            row.get("cancelled_transaction_id"),
-            row.get("voucher_info"),
+            row.get("updated"),
+            row.get("isOnlineBooking"),
+            row.get("salon_id"),
+            row.get("customer_id"),
         ),
         axis=1,
     )
 
     logger.info(f"Transformation complete | rows={len(df)}")
+
     return df
 
 
@@ -408,6 +393,7 @@ def run_etl():
 
     logger.info(f"Pipeline started | pipeline={PIPELINE_NAME} | run_id={run_id}")
     logger.info(f"Target raw table: {RAW_TABLE}")
+
     logger.info(
         f"Execution context | load_mode={LOAD_MODE} | write_mode={WRITE_MODE} | "
         f"backfill_start_date={BACKFILL_START_DATE} | backfill_end_date={BACKFILL_END_DATE}"
@@ -423,6 +409,7 @@ def run_etl():
         if LOAD_MODE == "backfill" and WRITE_MODE == "replace_window":
             window_start = BACKFILL_START_DATE
             window_end = BACKFILL_END_DATE
+
             delete_window(
                 client=client,
                 table_id=RAW_TABLE,
@@ -433,8 +420,10 @@ def run_etl():
 
         if LOAD_MODE == "incremental" and WRITE_MODE == "replace_window":
             incremental_start, incremental_end = get_incremental_window_dates()
+
             window_start = incremental_start.isoformat()
             window_end = incremental_end.isoformat()
+
             delete_window(
                 client=client,
                 table_id=RAW_TABLE,
@@ -475,10 +464,12 @@ def run_etl():
         success_message = (
             f"Pipeline succeeded | load_mode={LOAD_MODE} | write_mode={WRITE_MODE}"
         )
+
         if LOAD_MODE == "backfill":
             success_message += (
                 f" | window={BACKFILL_START_DATE} to {BACKFILL_END_DATE}"
             )
+
         if LOAD_MODE == "incremental" and WRITE_MODE == "replace_window":
             success_message += (
                 f" | window={window_start} to {window_end}"
@@ -499,19 +490,23 @@ def run_etl():
         logger.info(
             f"Pipeline finished successfully | rows_loaded={len(df)} | run_id={run_id}"
         )
+
         return f"{len(df)} rows loaded into {RAW_TABLE}", 200
 
     except Exception as e:
         finished_at = datetime.utcnow()
 
         error_message = str(e)
+
         if LOAD_MODE == "backfill":
             error_message = (
                 f"{error_message} | load_mode={LOAD_MODE} | "
                 f"window={BACKFILL_START_DATE} to {BACKFILL_END_DATE}"
             )
+
         if LOAD_MODE == "incremental" and WRITE_MODE == "replace_window":
             incremental_start, incremental_end = get_incremental_window_dates()
+
             error_message = (
                 f"{error_message} | load_mode={LOAD_MODE} | write_mode={WRITE_MODE} | "
                 f"window={incremental_start.isoformat()} to {incremental_end.isoformat()}"
@@ -529,6 +524,7 @@ def run_etl():
                 finished_at=finished_at,
                 message=error_message,
             )
+
         except Exception as log_error:
             logger.error(f"Could not log failed pipeline run: {log_error}")
 
@@ -547,4 +543,5 @@ def run_etl():
         )
 
         logger.exception(f"Pipeline failed | run_id={run_id}")
+
         return f"Pipeline failed: {str(e)}", 500
