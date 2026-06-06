@@ -157,7 +157,7 @@ def extract_page_records(payload):
 
 
 def resolve_window_field() -> str:
-    return "created"
+    return "start"
 
 
 def get_incremental_window_dates():
