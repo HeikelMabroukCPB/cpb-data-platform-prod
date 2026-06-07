@@ -12,7 +12,6 @@ from shared.bq import get_bq_client, load_dataframe_in_chunks
 from shared.mail import send_email
 from shared.metadata import log_pipeline_run
 from shared.utils import (
-    build_incremental_params,
     generate_record_hash_from_values,
     normalize_nullable_string,
     validate_common_config,
@@ -37,12 +36,10 @@ API_URL = os.environ.get("API_URL")
 API_TOKEN = os.environ.get("API_TOKEN")
 
 LOAD_MODE = os.environ.get("LOAD_MODE", "full").lower()
-INCREMENTAL_FIELD = os.environ.get("INCREMENTAL_FIELD", "updatedSince")
-INCREMENTAL_LOOKBACK_DAYS = int(os.environ.get("INCREMENTAL_LOOKBACK_DAYS", 2))
+WRITE_MODE = os.environ.get("WRITE_MODE", "append").lower()  # append | replace_window
 
 BACKFILL_START_DATE = os.environ.get("BACKFILL_START_DATE")  # YYYY-MM-DD
 BACKFILL_END_DATE = os.environ.get("BACKFILL_END_DATE")      # YYYY-MM-DD
-WRITE_MODE = os.environ.get("WRITE_MODE", "append").lower()  # append | replace_window
 
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 3))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", 60))
@@ -50,6 +47,15 @@ CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 5000))
 RATE_LIMIT_SLEEP_SECONDS = int(os.environ.get("RATE_LIMIT_SLEEP_SECONDS", 90))
 
 SOURCE_SYSTEM = os.environ.get("SOURCE_SYSTEM", "salonkee")
+
+# API limitation:
+# The API only allows filtering on booking startTime and max 100-day ranges.
+# For incremental loads, we scan 1 year into the future starting from yesterday.
+CREATED_RECORDS_FUTURE_LOOKAHEAD_DAYS = int(
+    os.environ.get("CREATED_RECORDS_FUTURE_LOOKAHEAD_DAYS", 365)
+)
+
+API_MAX_RANGE_DAYS = int(os.environ.get("API_MAX_RANGE_DAYS", 100))
 
 RAW_TABLE = f"{PROJECT_ID}.{DATASET_RAW}.{SOURCE_SYSTEM}_{TABLE_NAME}"
 META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
@@ -111,6 +117,15 @@ def validate_config() -> None:
     if WRITE_MODE not in ["append", "replace_window"]:
         raise ValueError("WRITE_MODE must be either 'append' or 'replace_window'")
 
+    if API_MAX_RANGE_DAYS <= 0:
+        raise ValueError("API_MAX_RANGE_DAYS must be greater than 0")
+
+    if API_MAX_RANGE_DAYS > 100:
+        raise ValueError("API_MAX_RANGE_DAYS cannot be greater than 100 because of the API limit")
+
+    if CREATED_RECORDS_FUTURE_LOOKAHEAD_DAYS <= 0:
+        raise ValueError("CREATED_RECORDS_FUTURE_LOOKAHEAD_DAYS must be greater than 0")
+
     if LOAD_MODE == "backfill":
         if not BACKFILL_START_DATE or not BACKFILL_END_DATE:
             raise ValueError(
@@ -155,36 +170,59 @@ def normalize_json_field(value):
 
 def resolve_window_field() -> str:
     """
-    For bookings, use updated as the replace_window field.
-    This is best for incremental refreshes because changed bookings will be replaced.
+    For this bookings pipeline, the incremental business logic is:
+    ingest records created yesterday.
+
+    The API cannot filter on created.
+    The API only filters on booking startTime.
+    Therefore:
+    - API window field = startTime
+    - BigQuery replace/delete window field = created
     """
-    return "updated"
+    return "created"
+
+
+def get_today_utc_date():
+    return datetime.now(timezone.utc).date()
+
+
+def get_yesterday_utc_date():
+    return datetime.now(timezone.utc).date() - timedelta(days=1)
 
 
 def get_incremental_window_dates():
-    end_date = datetime.now(timezone.utc).date()
-    start_date = end_date - timedelta(days=INCREMENTAL_LOOKBACK_DAYS)
-    return start_date, end_date
+    """
+    BigQuery replacement window for incremental loads.
+
+    Since the incremental logic loads records created yesterday,
+    the delete window should only delete yesterday's created records.
+    """
+    yesterday = get_yesterday_utc_date()
+    return yesterday, yesterday
 
 
-def build_api_params():
-    if LOAD_MODE == "full":
-        return {}
+def build_starttime_windows(start_date, end_date, max_range_days=100):
+    """
+    Builds API windows because the API only allows a max range of 100 days
+    on startTime / endTime.
+    """
+    windows = []
+    current_start = start_date
 
-    if LOAD_MODE == "incremental":
-        return build_incremental_params(
-            load_mode=LOAD_MODE,
-            incremental_field=INCREMENTAL_FIELD,
-            incremental_lookback_days=INCREMENTAL_LOOKBACK_DAYS,
+    while current_start <= end_date:
+        current_end = min(
+            current_start + timedelta(days=max_range_days - 1),
+            end_date
         )
 
-    if LOAD_MODE == "backfill":
-        return {
-            "startTime": BACKFILL_START_DATE,
-            "endTime": BACKFILL_END_DATE,
-        }
+        windows.append({
+            "startTime": current_start.isoformat(),
+            "endTime": current_end.isoformat(),
+        })
 
-    raise ValueError(f"Unsupported LOAD_MODE: {LOAD_MODE}")
+        current_start = current_end + timedelta(days=1)
+
+    return windows
 
 
 def delete_window(
@@ -226,6 +264,10 @@ def apply_window_filter(
         f"window_field={window_field} | start_date={start_date} | end_date={end_date}"
     )
 
+    if df.empty:
+        logger.info("Dataframe is empty. Skipping local window filter.")
+        return df
+
     if window_field not in df.columns:
         raise ValueError(
             f"Window field '{window_field}' not found in dataframe. "
@@ -259,70 +301,120 @@ def fetch_data() -> pd.DataFrame:
         "User-Agent": "cpb-data-platform/1.0",
     }
 
-    params = build_api_params()
-    logger.info(f"Fetching data from API | url={API_URL} | params={params}")
+    all_records = []
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            logger.info(f"Sending request attempt {attempt}/{MAX_RETRIES}")
+    if LOAD_MODE == "incremental":
+        yesterday = get_yesterday_utc_date()
 
-            response = requests.get(
-                API_URL,
-                headers=headers,
-                params=params,
-                timeout=REQUEST_TIMEOUT,
-            )
+        start_date = yesterday
+        end_date = yesterday + timedelta(days=CREATED_RECORDS_FUTURE_LOOKAHEAD_DAYS)
 
-            if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After")
+        api_windows = build_starttime_windows(
+            start_date=start_date,
+            end_date=end_date,
+            max_range_days=API_MAX_RANGE_DAYS,
+        )
 
-                wait_seconds = (
-                    int(retry_after)
-                    if retry_after and retry_after.isdigit()
-                    else RATE_LIMIT_SLEEP_SECONDS
+        logger.info(
+            f"Incremental created-yesterday load | "
+            f"scanning booking startTime from {start_date} to {end_date} | "
+            f"lookahead_days={CREATED_RECORDS_FUTURE_LOOKAHEAD_DAYS} | "
+            f"windows={len(api_windows)}"
+        )
+
+    elif LOAD_MODE == "backfill":
+        start_date = datetime.strptime(BACKFILL_START_DATE, "%Y-%m-%d").date()
+        end_date = datetime.strptime(BACKFILL_END_DATE, "%Y-%m-%d").date()
+
+        api_windows = build_starttime_windows(
+            start_date=start_date,
+            end_date=end_date,
+            max_range_days=API_MAX_RANGE_DAYS,
+        )
+
+        logger.info(
+            f"Backfill load | scanning booking startTime from {start_date} to {end_date} | "
+            f"windows={len(api_windows)}"
+        )
+
+    else:
+        api_windows = [{}]
+        logger.info("Full load | fetching without startTime/endTime params")
+
+    for params in api_windows:
+        logger.info(f"Fetching data from API | url={API_URL} | params={params}")
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                logger.info(f"Sending request attempt {attempt}/{MAX_RETRIES}")
+
+                response = requests.get(
+                    API_URL,
+                    headers=headers,
+                    params=params,
+                    timeout=REQUEST_TIMEOUT,
                 )
 
-                logger.warning(
-                    f"Rate limit hit on attempt {attempt}/{MAX_RETRIES}. "
-                    f"Waiting {wait_seconds} seconds before retry."
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After")
+
+                    wait_seconds = (
+                        int(retry_after)
+                        if retry_after and retry_after.isdigit()
+                        else RATE_LIMIT_SLEEP_SECONDS
+                    )
+
+                    logger.warning(
+                        f"Rate limit hit on attempt {attempt}/{MAX_RETRIES}. "
+                        f"Waiting {wait_seconds} seconds before retry."
+                    )
+                    logger.warning(f"429 response headers: {dict(response.headers)}")
+                    logger.warning(f"429 response body: {response.text}")
+
+                    if attempt == MAX_RETRIES:
+                        response.raise_for_status()
+
+                    time.sleep(wait_seconds)
+                    continue
+
+                response.raise_for_status()
+
+                data = response.json()
+                records = extract_page_records(data)
+
+                logger.info(
+                    f"Fetched {len(records)} rows from API window | params={params}"
                 )
-                logger.warning(f"429 response headers: {dict(response.headers)}")
-                logger.warning(f"429 response body: {response.text}")
+
+                all_records.extend(records)
+                break
+
+            except requests.exceptions.HTTPError as e:
+                logger.warning(f"HTTP error on attempt {attempt}/{MAX_RETRIES}: {e}")
 
                 if attempt == MAX_RETRIES:
-                    response.raise_for_status()
+                    raise
 
-                time.sleep(wait_seconds)
-                continue
+                time.sleep(5)
 
-            response.raise_for_status()
+            except Exception as e:
+                logger.warning(f"Attempt {attempt}/{MAX_RETRIES} failed: {e}")
 
-            data = response.json()
-            records = extract_page_records(data)
-            df = pd.json_normalize(records)
+                if attempt == MAX_RETRIES:
+                    raise
 
-            logger.info(f"Fetched {len(df)} rows from API")
-            logger.info(f"Columns received: {list(df.columns)}")
+                time.sleep(5)
 
-            return df
+    df = pd.json_normalize(all_records)
 
-        except requests.exceptions.HTTPError as e:
-            logger.warning(f"HTTP error on attempt {attempt}/{MAX_RETRIES}: {e}")
+    logger.info(f"Fetched total rows before local filtering: {len(df)}")
 
-            if attempt == MAX_RETRIES:
-                raise
+    if not df.empty:
+        logger.info(f"Columns received: {list(df.columns)}")
+    else:
+        logger.info("No rows received from API")
 
-            time.sleep(5)
-
-        except Exception as e:
-            logger.warning(f"Attempt {attempt}/{MAX_RETRIES} failed: {e}")
-
-            if attempt == MAX_RETRIES:
-                raise
-
-            time.sleep(5)
-
-    raise RuntimeError("Failed to fetch data from API")
+    return df
 
 
 # =================================
@@ -331,6 +423,20 @@ def fetch_data() -> pd.DataFrame:
 
 def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     logger.info("Transforming dataframe for raw layer")
+
+    if df.empty:
+        logger.info("Input dataframe is empty. Returning empty dataframe with target columns.")
+
+        empty_df = pd.DataFrame(columns=[
+            *SELECTED_COLUMNS,
+            "source_system",
+            "run_id",
+            "load_timestamp",
+            "load_date",
+            "record_hash",
+        ])
+
+        return empty_df
 
     missing_cols = [col for col in SELECTED_COLUMNS if col not in df.columns]
 
@@ -382,6 +488,34 @@ def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
     return df
 
 
+def filter_incremental_created_yesterday(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    The API only allows filtering on booking startTime.
+    So in incremental mode we fetch all bookings with startTime between:
+    yesterday and yesterday + 365 days.
+
+    Then we keep only the records created yesterday.
+    """
+    if df.empty:
+        logger.info("Dataframe is empty. Skipping created-yesterday filter.")
+        return df
+
+    yesterday = get_yesterday_utc_date()
+    rows_before = len(df)
+
+    df = df[
+        df["created"].notna()
+        & (df["created"].dt.date == yesterday)
+    ].copy()
+
+    logger.info(
+        f"Filtered to bookings created yesterday | "
+        f"created_date={yesterday} | rows_before={rows_before} | rows_after={len(df)}"
+    )
+
+    return df
+
+
 # =================================
 # Main ETL
 # =================================
@@ -396,7 +530,9 @@ def run_etl():
 
     logger.info(
         f"Execution context | load_mode={LOAD_MODE} | write_mode={WRITE_MODE} | "
-        f"backfill_start_date={BACKFILL_START_DATE} | backfill_end_date={BACKFILL_END_DATE}"
+        f"backfill_start_date={BACKFILL_START_DATE} | backfill_end_date={BACKFILL_END_DATE} | "
+        f"created_records_future_lookahead_days={CREATED_RECORDS_FUTURE_LOOKAHEAD_DAYS} | "
+        f"api_max_range_days={API_MAX_RANGE_DAYS}"
     )
 
     try:
@@ -435,6 +571,9 @@ def run_etl():
         raw_df = fetch_data()
         df = transform_dataframe(raw_df, run_id)
 
+        if LOAD_MODE == "incremental":
+            df = filter_incremental_created_yesterday(df)
+
         if LOAD_MODE == "backfill" and WRITE_MODE == "replace_window":
             df = apply_window_filter(
                 df=df,
@@ -443,21 +582,16 @@ def run_etl():
                 window_field=window_field,
             )
 
-        if LOAD_MODE == "incremental" and WRITE_MODE == "replace_window":
-            df = apply_window_filter(
+        if not df.empty:
+            load_dataframe_in_chunks(
+                client=client,
                 df=df,
-                start_date=window_start,
-                end_date=window_end,
-                window_field=window_field,
+                table_id=RAW_TABLE,
+                schema=TABLE_SCHEMA,
+                chunk_size=CHUNK_SIZE,
             )
-
-        load_dataframe_in_chunks(
-            client=client,
-            df=df,
-            table_id=RAW_TABLE,
-            schema=TABLE_SCHEMA,
-            chunk_size=CHUNK_SIZE,
-        )
+        else:
+            logger.info("No rows to load into BigQuery.")
 
         finished_at = datetime.utcnow()
 
@@ -470,9 +604,10 @@ def run_etl():
                 f" | window={BACKFILL_START_DATE} to {BACKFILL_END_DATE}"
             )
 
-        if LOAD_MODE == "incremental" and WRITE_MODE == "replace_window":
+        if LOAD_MODE == "incremental":
             success_message += (
-                f" | window={window_start} to {window_end}"
+                f" | created_window={window_start} to {window_end}"
+                f" | scanned_startTime_days={CREATED_RECORDS_FUTURE_LOOKAHEAD_DAYS}"
             )
 
         log_pipeline_run(
@@ -509,7 +644,8 @@ def run_etl():
 
             error_message = (
                 f"{error_message} | load_mode={LOAD_MODE} | write_mode={WRITE_MODE} | "
-                f"window={incremental_start.isoformat()} to {incremental_end.isoformat()}"
+                f"created_window={incremental_start.isoformat()} to {incremental_end.isoformat()} | "
+                f"scanned_startTime_days={CREATED_RECORDS_FUTURE_LOOKAHEAD_DAYS}"
             )
 
         try:
@@ -538,6 +674,8 @@ def run_etl():
                 f"Write mode: {WRITE_MODE}\n"
                 f"Backfill start date: {BACKFILL_START_DATE}\n"
                 f"Backfill end date: {BACKFILL_END_DATE}\n"
+                f"Created records future lookahead days: {CREATED_RECORDS_FUTURE_LOOKAHEAD_DAYS}\n"
+                f"API max range days: {API_MAX_RANGE_DAYS}\n"
                 f"Error: {str(e)}"
             ),
         )
