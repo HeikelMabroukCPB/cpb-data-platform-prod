@@ -547,6 +547,7 @@ def load_parquet_to_staging(
         table_id,
     )
 
+
     load_started = perf_counter()
 
     job = client.load_table_from_uri(
