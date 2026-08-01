@@ -646,6 +646,122 @@ steps:
       - '--region'
       - 'europe-west1'
 
+  # Update Cloud Run job: bookings-fr
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'salonkee-bookings-fr'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: customers-fr
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'salonkee-customers-fr'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: employees-fr
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'salonkee-employees-fr'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: events-fr
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'salonkee-events-fr'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: events-future-fr
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'salonkee-events-future-fr'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: products-fr
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'salonkee-products-fr'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: sales-fr
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'salonkee-sales-fr'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: salons-fr
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'salonkee-salons-fr'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
+  # Update Cloud Run job: services-fr
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'salonkee-services-fr'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
 
 options:
   logging: CLOUD_LOGGING_ONLY
