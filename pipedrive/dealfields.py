@@ -1,0 +1,677 @@
+import json
+import logging
+import os
+import time
+from datetime import datetime, timezone
+
+import pandas as pd
+import requests
+from google.cloud import bigquery
+
+from shared.bq import get_bq_client, load_dataframe_in_chunks
+from shared.mail import send_email
+from shared.metadata import log_pipeline_run
+from shared.utils import (
+    generate_record_hash_from_values,
+    validate_common_config,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+# =================================
+# Config
+# =================================
+
+PROJECT_ID = os.environ.get(
+    "PROJECT_ID",
+    "cpb-data-platform-prod",
+)
+
+DATASET_RAW = os.environ.get(
+    "DATASET_RAW",
+    "cpb_raw",
+)
+
+DATASET_META = os.environ.get(
+    "DATASET_META",
+    "cpb_meta",
+)
+
+PIPELINE_NAME = os.environ.get(
+    "PIPELINE_NAME",
+    "pipedrive_deal_fields",
+)
+
+SOURCE_SYSTEM = "pipedrive"
+TABLE_NAME = "deal_fields"
+
+PIPEDRIVE_API_TOKEN = os.environ.get(
+    "PIPEDRIVE_API_TOKEN"
+)
+
+PIPEDRIVE_COMPANY_DOMAIN = os.environ.get(
+    "PIPEDRIVE_COMPANY_DOMAIN"
+)
+
+MAX_RETRIES = int(
+    os.environ.get(
+        "MAX_RETRIES",
+        3,
+    )
+)
+
+REQUEST_TIMEOUT = int(
+    os.environ.get(
+        "REQUEST_TIMEOUT",
+        60,
+    )
+)
+
+PAGE_SIZE = int(
+    os.environ.get(
+        "PAGE_SIZE",
+        500,
+    )
+)
+
+CHUNK_SIZE = int(
+    os.environ.get(
+        "CHUNK_SIZE",
+        5000,
+    )
+)
+
+RAW_TABLE = (
+    f"{PROJECT_ID}."
+    f"{DATASET_RAW}."
+    f"{SOURCE_SYSTEM}_{TABLE_NAME}"
+)
+
+META_TABLE = (
+    f"{PROJECT_ID}."
+    f"{DATASET_META}."
+    f"pipeline_runs"
+)
+
+DEAL_FIELDS_URL = (
+    f"https://{PIPEDRIVE_COMPANY_DOMAIN}.pipedrive.com"
+    f"/api/v2/dealFields"
+)
+
+
+# =================================
+# Schema
+# =================================
+
+TABLE_SCHEMA = [
+    bigquery.SchemaField(
+        "field_code",
+        "STRING",
+    ),
+    bigquery.SchemaField(
+        "field_name",
+        "STRING",
+    ),
+    bigquery.SchemaField(
+        "field_type",
+        "STRING",
+    ),
+    bigquery.SchemaField(
+        "is_custom_field",
+        "BOOL",
+    ),
+    bigquery.SchemaField(
+        "is_optional_response_field",
+        "BOOL",
+    ),
+
+    bigquery.SchemaField(
+        "options",
+        "STRING",
+    ),
+
+    bigquery.SchemaField(
+        "subfields",
+        "STRING",
+    ),
+
+    bigquery.SchemaField(
+        "raw_payload",
+        "STRING",
+    ),
+
+    bigquery.SchemaField(
+        "source_system",
+        "STRING",
+    ),
+    bigquery.SchemaField(
+        "run_id",
+        "STRING",
+    ),
+    bigquery.SchemaField(
+        "load_timestamp",
+        "TIMESTAMP",
+    ),
+    bigquery.SchemaField(
+        "load_date",
+        "DATE",
+    ),
+    bigquery.SchemaField(
+        "record_hash",
+        "STRING",
+    ),
+]
+
+
+# =================================
+# Validation
+# =================================
+
+def validate_config():
+
+    validate_common_config({
+        "PROJECT_ID": PROJECT_ID,
+        "DATASET_RAW": DATASET_RAW,
+        "DATASET_META": DATASET_META,
+        "PIPELINE_NAME": PIPELINE_NAME,
+        "PIPEDRIVE_API_TOKEN": PIPEDRIVE_API_TOKEN,
+        "PIPEDRIVE_COMPANY_DOMAIN": PIPEDRIVE_COMPANY_DOMAIN,
+    })
+
+    if PAGE_SIZE > 500:
+        raise ValueError(
+            "PAGE_SIZE cannot be greater than 500"
+        )
+
+
+# =================================
+# Helpers
+# =================================
+
+def normalize_json(value):
+
+    if value is None:
+        return None
+
+    if (
+        isinstance(value, float)
+        and pd.isna(value)
+    ):
+        return None
+
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+
+
+# =================================
+# API
+# =================================
+
+def fetch_page(cursor=None):
+
+    params = {
+        "api_token": PIPEDRIVE_API_TOKEN,
+        "limit": PAGE_SIZE,
+    }
+
+    if cursor:
+        params["cursor"] = cursor
+
+    for attempt in range(
+        1,
+        MAX_RETRIES + 1,
+    ):
+
+        try:
+
+            logger.info(
+                "Fetching Pipedrive deal fields "
+                f"| cursor={cursor}"
+            )
+
+            response = requests.get(
+                DEAL_FIELDS_URL,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+            )
+
+            if response.status_code == 429:
+
+                logger.warning(
+                    "Pipedrive rate limit reached "
+                    f"| attempt={attempt}"
+                )
+
+                if attempt == MAX_RETRIES:
+                    response.raise_for_status()
+
+                time.sleep(30)
+                continue
+
+            if not response.ok:
+
+                logger.error(
+                    "Pipedrive API error "
+                    f"| status={response.status_code} "
+                    f"| response={response.text}"
+                )
+
+            response.raise_for_status()
+
+            payload = response.json()
+
+            if not payload.get(
+                "success",
+                False,
+            ):
+                raise ValueError(
+                    "Pipedrive returned "
+                    "unsuccessful response "
+                    f"| response={payload}"
+                )
+
+            data = (
+                payload.get("data")
+                or []
+            )
+
+            additional_data = (
+                payload.get(
+                    "additional_data"
+                )
+                or {}
+            )
+
+            next_cursor = (
+                additional_data.get(
+                    "next_cursor"
+                )
+            )
+
+            if not next_cursor:
+
+                pagination = (
+                    additional_data.get(
+                        "pagination"
+                    )
+                    or {}
+                )
+
+                next_cursor = (
+                    pagination.get(
+                        "next_cursor"
+                    )
+                )
+
+            return (
+                data,
+                next_cursor,
+            )
+
+        except requests.RequestException as e:
+
+            logger.warning(
+                "Pipedrive request failed "
+                f"| attempt={attempt} "
+                f"| error={e}"
+            )
+
+            if attempt == MAX_RETRIES:
+                raise
+
+            time.sleep(5)
+
+    raise RuntimeError(
+        "Failed to fetch "
+        "Pipedrive deal fields"
+    )
+
+
+def fetch_data():
+
+    records = []
+    cursor = None
+    page = 1
+
+    while True:
+
+        page_records, next_cursor = (
+            fetch_page(
+                cursor=cursor
+            )
+        )
+
+        if not page_records:
+            break
+
+        records.extend(
+            page_records
+        )
+
+        logger.info(
+            "Pipedrive deal fields page fetched "
+            f"| page={page} "
+            f"| rows={len(page_records)} "
+            f"| total={len(records)}"
+        )
+
+        if not next_cursor:
+            break
+
+        cursor = next_cursor
+        page += 1
+
+    logger.info(
+        "Finished fetching "
+        "Pipedrive deal fields "
+        f"| total={len(records)}"
+    )
+
+    return pd.DataFrame(
+        records
+    )
+
+
+# =================================
+# Transform
+# =================================
+
+def transform_dataframe(
+    df: pd.DataFrame,
+    run_id: str,
+):
+
+    if df.empty:
+
+        logger.info(
+            "No Pipedrive deal fields returned"
+        )
+
+        return pd.DataFrame(
+            columns=[
+                field.name
+                for field in TABLE_SCHEMA
+            ]
+        )
+
+    transformed = pd.DataFrame()
+
+    transformed["field_code"] = (
+        df["field_code"]
+        .astype("string")
+    )
+
+    transformed["field_name"] = (
+        df["field_name"]
+        .astype("string")
+    )
+
+    transformed["field_type"] = (
+        df["field_type"]
+        .astype("string")
+    )
+
+    transformed["is_custom_field"] = (
+        df["is_custom_field"]
+        .astype("boolean")
+        if "is_custom_field" in df.columns
+        else None
+    )
+
+    transformed[
+        "is_optional_response_field"
+    ] = (
+        df["is_optional_response_field"]
+        .astype("boolean")
+        if "is_optional_response_field" in df.columns
+        else None
+    )
+
+    transformed["options"] = (
+        df["options"]
+        .apply(
+            normalize_json
+        )
+        if "options" in df.columns
+        else None
+    )
+
+    transformed["subfields"] = (
+        df["subfields"]
+        .apply(
+            normalize_json
+        )
+        if "subfields" in df.columns
+        else None
+    )
+
+    transformed["raw_payload"] = (
+        df.apply(
+            lambda row:
+                json.dumps(
+                    row.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ),
+            axis=1,
+        )
+    )
+
+    load_timestamp = (
+        datetime.now(
+            timezone.utc
+        )
+    )
+
+    transformed[
+        "source_system"
+    ] = SOURCE_SYSTEM
+
+    transformed[
+        "run_id"
+    ] = run_id
+
+    transformed[
+        "load_timestamp"
+    ] = load_timestamp
+
+    transformed[
+        "load_date"
+    ] = load_timestamp.date()
+
+    transformed[
+        "record_hash"
+    ] = transformed.apply(
+        lambda row:
+            generate_record_hash_from_values(
+                row["field_code"],
+                row["field_name"],
+                row["field_type"],
+                row["options"],
+                row["subfields"],
+                row["raw_payload"],
+            ),
+        axis=1,
+    )
+
+    string_columns = [
+        "field_code",
+        "field_name",
+        "field_type",
+        "options",
+        "subfields",
+        "raw_payload",
+        "source_system",
+        "run_id",
+        "record_hash",
+    ]
+
+    for col in string_columns:
+
+        if col in transformed.columns:
+
+            transformed[col] = (
+                transformed[col]
+                .apply(
+                    lambda value:
+                        None
+                        if value is None
+                        or (
+                            pd.api.types.is_scalar(value)
+                            and pd.isna(value)
+                        )
+                        else str(value)
+                )
+                .astype("string")
+            )
+
+    logger.info(
+        "Transformation complete "
+        f"| rows={len(transformed)} "
+        f"| columns={len(transformed.columns)}"
+    )
+
+    return transformed
+
+
+# =================================
+# Main ETL
+# =================================
+
+def run_etl():
+
+    client = get_bq_client()
+
+    run_id = (
+        datetime.now(
+            timezone.utc
+        )
+        .strftime(
+            "%Y%m%d_%H%M%S"
+        )
+    )
+
+    started_at = (
+        datetime.now(
+            timezone.utc
+        )
+    )
+
+    try:
+
+        validate_config()
+
+        logger.info(
+            "Pipeline started "
+            f"| pipeline={PIPELINE_NAME} "
+            f"| run_id={run_id}"
+        )
+
+        logger.info(
+            f"Target raw table: {RAW_TABLE}"
+        )
+
+        raw_df = fetch_data()
+
+        df = transform_dataframe(
+            df=raw_df,
+            run_id=run_id,
+        )
+
+        load_dataframe_in_chunks(
+            client=client,
+            df=df,
+            table_id=RAW_TABLE,
+            schema=TABLE_SCHEMA,
+            chunk_size=CHUNK_SIZE,
+        )
+
+        finished_at = (
+            datetime.now(
+                timezone.utc
+            )
+        )
+
+        log_pipeline_run(
+            client=client,
+            meta_table=META_TABLE,
+            pipeline_name=PIPELINE_NAME,
+            run_id=run_id,
+            status="SUCCESS",
+            rows_loaded=len(df),
+            started_at=started_at,
+            finished_at=finished_at,
+            message="Pipeline succeeded",
+        )
+
+        logger.info(
+            "Pipeline finished successfully "
+            f"| rows_loaded={len(df)} "
+            f"| run_id={run_id}"
+        )
+
+        return (
+            f"{len(df)} rows loaded "
+            f"into {RAW_TABLE}",
+            200,
+        )
+
+    except Exception as e:
+
+        finished_at = (
+            datetime.now(
+                timezone.utc
+            )
+        )
+
+        try:
+
+            log_pipeline_run(
+                client=client,
+                meta_table=META_TABLE,
+                pipeline_name=PIPELINE_NAME,
+                run_id=run_id,
+                status="FAILED",
+                rows_loaded=0,
+                started_at=started_at,
+                finished_at=finished_at,
+                message=str(e),
+            )
+
+        except Exception as log_error:
+
+            logger.error(
+                "Could not log "
+                "failed pipeline run "
+                f"| error={log_error}"
+            )
+
+        send_email(
+            subject=(
+                f"❌ {PIPELINE_NAME} "
+                "pipeline failed"
+            ),
+            body=(
+                f"Pipeline: {PIPELINE_NAME}\n"
+                f"Run ID: {run_id}\n"
+                f"Time: {finished_at}\n"
+                f"Error: {str(e)}"
+            ),
+        )
+
+        logger.exception(
+            "Pipeline failed "
+            f"| run_id={run_id}"
+        )
+
+        return (
+            f"Pipeline failed: {str(e)}",
+            500,
+        )
