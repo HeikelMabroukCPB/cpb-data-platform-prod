@@ -234,11 +234,11 @@ def clean_json_value(value):
 def fetch_page(cursor=None):
 
     params = {
-        "api_token": PIPEDRIVE_API_TOKEN,
-        "limit": PAGE_SIZE,
-        "sort_by": "order_nr",
-        "sort_direction": "asc",
-    }
+    "api_token": PIPEDRIVE_API_TOKEN,
+    "limit": PAGE_SIZE,
+    "sort_by": "id",
+    "sort_direction": "asc",
+}
 
     if cursor:
         params["cursor"] = cursor
