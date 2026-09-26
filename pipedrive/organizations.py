@@ -24,9 +24,20 @@ logger = logging.getLogger(__name__)
 # Config
 # =================================
 
-PROJECT_ID = os.environ.get("PROJECT_ID", "cpb-data-platform-prod")
-DATASET_RAW = os.environ.get("DATASET_RAW", "cpb_raw")
-DATASET_META = os.environ.get("DATASET_META", "cpb_meta")
+PROJECT_ID = os.environ.get(
+    "PROJECT_ID",
+    "cpb-data-platform-prod",
+)
+
+DATASET_RAW = os.environ.get(
+    "DATASET_RAW",
+    "cpb_raw",
+)
+
+DATASET_META = os.environ.get(
+    "DATASET_META",
+    "cpb_meta",
+)
 
 PIPELINE_NAME = os.environ.get(
     "PIPELINE_NAME",
@@ -36,8 +47,13 @@ PIPELINE_NAME = os.environ.get(
 SOURCE_SYSTEM = "pipedrive"
 TABLE_NAME = "organizations"
 
-PIPEDRIVE_API_TOKEN = os.environ.get("PIPEDRIVE_API_TOKEN")
-PIPEDRIVE_COMPANY_DOMAIN = os.environ.get("PIPEDRIVE_COMPANY_DOMAIN")
+PIPEDRIVE_API_TOKEN = os.environ.get(
+    "PIPEDRIVE_API_TOKEN"
+)
+
+PIPEDRIVE_COMPANY_DOMAIN = os.environ.get(
+    "PIPEDRIVE_COMPANY_DOMAIN"
+)
 
 LOAD_MODE = os.environ.get(
     "LOAD_MODE",
@@ -45,21 +61,50 @@ LOAD_MODE = os.environ.get(
 ).lower()  # full | incremental
 
 INCREMENTAL_LOOKBACK_DAYS = int(
-    os.environ.get("INCREMENTAL_LOOKBACK_DAYS", 2)
+    os.environ.get(
+        "INCREMENTAL_LOOKBACK_DAYS",
+        2,
+    )
 )
 
-MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 3))
-REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", 60))
-PAGE_SIZE = int(os.environ.get("PAGE_SIZE", 500))
-CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 5000))
+MAX_RETRIES = int(
+    os.environ.get(
+        "MAX_RETRIES",
+        3,
+    )
+)
+
+REQUEST_TIMEOUT = int(
+    os.environ.get(
+        "REQUEST_TIMEOUT",
+        60,
+    )
+)
+
+PAGE_SIZE = int(
+    os.environ.get(
+        "PAGE_SIZE",
+        500,
+    )
+)
+
+CHUNK_SIZE = int(
+    os.environ.get(
+        "CHUNK_SIZE",
+        5000,
+    )
+)
 
 RAW_TABLE = (
-    f"{PROJECT_ID}.{DATASET_RAW}."
+    f"{PROJECT_ID}."
+    f"{DATASET_RAW}."
     f"{SOURCE_SYSTEM}_{TABLE_NAME}"
 )
 
 META_TABLE = (
-    f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
+    f"{PROJECT_ID}."
+    f"{DATASET_META}."
+    f"pipeline_runs"
 )
 
 ORGANIZATIONS_URL = (
@@ -73,31 +118,76 @@ ORGANIZATIONS_URL = (
 # =================================
 
 TABLE_SCHEMA = [
-    bigquery.SchemaField("organization_id", "INT64"),
-    bigquery.SchemaField("name", "STRING"),
-    bigquery.SchemaField("owner_id", "INT64"),
+    bigquery.SchemaField(
+        "organization_id",
+        "INT64",
+    ),
+    bigquery.SchemaField(
+        "name",
+        "STRING",
+    ),
+    bigquery.SchemaField(
+        "owner_id",
+        "INT64",
+    ),
 
-    bigquery.SchemaField("add_time", "TIMESTAMP"),
-    bigquery.SchemaField("update_time", "TIMESTAMP"),
+    bigquery.SchemaField(
+        "add_time",
+        "TIMESTAMP",
+    ),
+    bigquery.SchemaField(
+        "update_time",
+        "TIMESTAMP",
+    ),
 
-    bigquery.SchemaField("visible_to", "STRING"),
+    bigquery.SchemaField(
+        "visible_to",
+        "STRING",
+    ),
 
     # Labels
-    bigquery.SchemaField("label_ids", "STRING"),
-    bigquery.SchemaField("labels", "STRING"),
+    bigquery.SchemaField(
+        "label_ids",
+        "STRING",
+    ),
+    bigquery.SchemaField(
+        "labels",
+        "STRING",
+    ),
 
     # Address
-    bigquery.SchemaField("address", "STRING"),
+    bigquery.SchemaField(
+        "address",
+        "STRING",
+    ),
 
-    # Full record from Pipedrive
-    bigquery.SchemaField("raw_payload", "STRING"),
+    # Full API response record
+    bigquery.SchemaField(
+        "raw_payload",
+        "STRING",
+    ),
 
-    # Technical
-    bigquery.SchemaField("source_system", "STRING"),
-    bigquery.SchemaField("run_id", "STRING"),
-    bigquery.SchemaField("load_timestamp", "TIMESTAMP"),
-    bigquery.SchemaField("load_date", "DATE"),
-    bigquery.SchemaField("record_hash", "STRING"),
+    # Technical columns
+    bigquery.SchemaField(
+        "source_system",
+        "STRING",
+    ),
+    bigquery.SchemaField(
+        "run_id",
+        "STRING",
+    ),
+    bigquery.SchemaField(
+        "load_timestamp",
+        "TIMESTAMP",
+    ),
+    bigquery.SchemaField(
+        "load_date",
+        "DATE",
+    ),
+    bigquery.SchemaField(
+        "record_hash",
+        "STRING",
+    ),
 ]
 
 
@@ -116,9 +206,18 @@ def validate_config():
         "PIPEDRIVE_COMPANY_DOMAIN": PIPEDRIVE_COMPANY_DOMAIN,
     })
 
-    if LOAD_MODE not in ["full", "incremental"]:
+    if LOAD_MODE not in [
+        "full",
+        "incremental",
+    ]:
         raise ValueError(
-            "LOAD_MODE must be 'full' or 'incremental'"
+            "LOAD_MODE must be "
+            "'full' or 'incremental'"
+        )
+
+    if PAGE_SIZE > 500:
+        raise ValueError(
+            "PAGE_SIZE cannot be greater than 500"
         )
 
 
@@ -143,7 +242,10 @@ def normalize_json(value):
     if value is None:
         return None
 
-    if isinstance(value, float) and pd.isna(value):
+    if (
+        isinstance(value, float)
+        and pd.isna(value)
+    ):
         return None
 
     return json.dumps(
@@ -165,9 +267,6 @@ def fetch_page(cursor=None):
         "limit": PAGE_SIZE,
         "sort_by": "update_time",
         "sort_direction": "asc",
-
-        # Important:
-        # returns readable label objects
         "include_labels": "true",
     }
 
@@ -175,7 +274,7 @@ def fetch_page(cursor=None):
         params["cursor"] = cursor
 
     # ---------------------------------
-    # Incremental filter
+    # Incremental loading
     # ---------------------------------
 
     if LOAD_MODE == "incremental":
@@ -185,12 +284,17 @@ def fetch_page(cursor=None):
             - timedelta(
                 days=INCREMENTAL_LOOKBACK_DAYS
             )
+        ).replace(
+            microsecond=0
         )
 
         params["updated_since"] = (
             cutoff
             .isoformat()
-            .replace("+00:00", "Z")
+            .replace(
+                "+00:00",
+                "Z",
+            )
         )
 
     # ---------------------------------
@@ -204,11 +308,20 @@ def fetch_page(cursor=None):
 
         try:
 
+            logger.info(
+                "Fetching Pipedrive organizations "
+                f"| cursor={cursor}"
+            )
+
             response = requests.get(
                 ORGANIZATIONS_URL,
                 params=params,
                 timeout=REQUEST_TIMEOUT,
             )
+
+            # ---------------------------------
+            # Rate limit
+            # ---------------------------------
 
             if response.status_code == 429:
 
@@ -217,31 +330,81 @@ def fetch_page(cursor=None):
                     f"| attempt={attempt}"
                 )
 
+                if attempt == MAX_RETRIES:
+                    response.raise_for_status()
+
                 time.sleep(30)
                 continue
 
+            # ---------------------------------
+            # Log API error body
+            # ---------------------------------
+
+            if not response.ok:
+
+                logger.error(
+                    "Pipedrive API error "
+                    f"| status={response.status_code} "
+                    f"| response={response.text}"
+                )
+
             response.raise_for_status()
+
+            # ---------------------------------
+            # Parse response
+            # ---------------------------------
 
             payload = response.json()
 
-            if not payload.get("success", False):
+            if not payload.get(
+                "success",
+                False,
+            ):
                 raise ValueError(
-                    f"Pipedrive returned unsuccessful response: "
-                    f"{payload}"
+                    "Pipedrive returned "
+                    "unsuccessful response "
+                    f"| response={payload}"
                 )
 
-            data = payload.get("data") or []
+            data = (
+                payload.get("data")
+                or []
+            )
 
             additional_data = (
-                payload.get("additional_data")
+                payload.get(
+                    "additional_data"
+                )
                 or {}
             )
 
             next_cursor = (
-                additional_data.get("next_cursor")
+                additional_data.get(
+                    "next_cursor"
+                )
             )
 
-            return data, next_cursor
+            # Some responses may nest
+            # pagination information
+            if not next_cursor:
+
+                pagination = (
+                    additional_data.get(
+                        "pagination"
+                    )
+                    or {}
+                )
+
+                next_cursor = (
+                    pagination.get(
+                        "next_cursor"
+                    )
+                )
+
+            return (
+                data,
+                next_cursor,
+            )
 
         except requests.RequestException as e:
 
@@ -257,7 +420,8 @@ def fetch_page(cursor=None):
             time.sleep(5)
 
     raise RuntimeError(
-        "Failed to fetch Pipedrive organizations"
+        "Failed to fetch "
+        "Pipedrive organizations"
     )
 
 
@@ -270,16 +434,20 @@ def fetch_data():
     while True:
 
         page_records, next_cursor = (
-            fetch_page(cursor)
+            fetch_page(
+                cursor=cursor
+            )
         )
 
         if not page_records:
             break
 
-        records.extend(page_records)
+        records.extend(
+            page_records
+        )
 
         logger.info(
-            f"Pipedrive page fetched "
+            "Pipedrive page fetched "
             f"| page={page} "
             f"| rows={len(page_records)} "
             f"| total={len(records)}"
@@ -292,10 +460,14 @@ def fetch_data():
         page += 1
 
     logger.info(
-        f"Fetched {len(records)} organizations"
+        "Finished fetching "
+        "Pipedrive organizations "
+        f"| total={len(records)}"
     )
 
-    return pd.DataFrame(records)
+    return pd.DataFrame(
+        records
+    )
 
 
 # =================================
@@ -309,6 +481,10 @@ def transform_dataframe(
 
     if df.empty:
 
+        logger.info(
+            "No Pipedrive organizations returned"
+        )
+
         return pd.DataFrame(
             columns=[
                 field.name
@@ -319,39 +495,61 @@ def transform_dataframe(
     transformed = pd.DataFrame()
 
     # ---------------------------------
-    # Core organization fields
+    # Organization
     # ---------------------------------
 
     transformed["organization_id"] = (
         pd.to_numeric(
             df["id"],
             errors="coerce",
-        ).astype("Int64")
+        ).astype(
+            "Int64"
+        )
     )
 
     transformed["name"] = (
-        df["name"].astype("string")
+        df["name"]
+        .astype("string")
     )
+
+    # ---------------------------------
+    # Owner
+    # ---------------------------------
 
     transformed["owner_id"] = (
         pd.to_numeric(
             df.get("owner_id"),
             errors="coerce",
-        ).astype("Int64")
+        ).astype(
+            "Int64"
+        )
     )
+
+    # ---------------------------------
+    # Dates
+    # ---------------------------------
 
     transformed["add_time"] = (
         df["add_time"]
-        .apply(parse_timestamp)
+        .apply(
+            parse_timestamp
+        )
     )
 
     transformed["update_time"] = (
         df["update_time"]
-        .apply(parse_timestamp)
+        .apply(
+            parse_timestamp
+        )
     )
 
+    # ---------------------------------
+    # Visibility
+    # ---------------------------------
+
     transformed["visible_to"] = (
-        df["visible_to"].astype("string")
+        df["visible_to"]
+        .astype("string")
         if "visible_to" in df.columns
         else None
     )
@@ -361,7 +559,8 @@ def transform_dataframe(
     # =================================
 
     transformed["label_ids"] = (
-        df["label_ids"].apply(
+        df["label_ids"]
+        .apply(
             normalize_json
         )
         if "label_ids" in df.columns
@@ -369,7 +568,8 @@ def transform_dataframe(
     )
 
     transformed["labels"] = (
-        df["labels"].apply(
+        df["labels"]
+        .apply(
             normalize_json
         )
         if "labels" in df.columns
@@ -381,10 +581,14 @@ def transform_dataframe(
     # =================================
 
     transformed["address"] = (
-        df["address"].apply(
+        df["address"]
+        .apply(
             lambda value:
                 value.get("value")
-                if isinstance(value, dict)
+                if isinstance(
+                    value,
+                    dict,
+                )
                 else value
         )
         if "address" in df.columns
@@ -392,7 +596,7 @@ def transform_dataframe(
     )
 
     # =================================
-    # Full Pipedrive record
+    # Raw payload
     # =================================
 
     transformed["raw_payload"] = (
@@ -412,47 +616,87 @@ def transform_dataframe(
     # Technical metadata
     # =================================
 
-    load_timestamp = datetime.now(
-        timezone.utc
+    load_timestamp = (
+        datetime.now(
+            timezone.utc
+        )
     )
 
-    transformed["source_system"] = (
-        SOURCE_SYSTEM
-    )
+    transformed[
+        "source_system"
+    ] = SOURCE_SYSTEM
 
-    transformed["run_id"] = run_id
+    transformed[
+        "run_id"
+    ] = run_id
 
-    transformed["load_timestamp"] = (
-        load_timestamp
-    )
+    transformed[
+        "load_timestamp"
+    ] = load_timestamp
 
-    transformed["load_date"] = (
-        load_timestamp.date()
-    )
+    transformed[
+        "load_date"
+    ] = load_timestamp.date()
 
     # =================================
     # Record hash
     # =================================
 
-    transformed["record_hash"] = (
-        transformed.apply(
-            lambda row:
-                generate_record_hash_from_values(
-                    row["organization_id"],
-                    row["name"],
-                    row["owner_id"],
-                    row["update_time"],
-                    row["label_ids"],
-                    row["labels"],
-                    row["raw_payload"],
-                ),
-            axis=1,
-        )
+    transformed[
+        "record_hash"
+    ] = transformed.apply(
+        lambda row:
+            generate_record_hash_from_values(
+                row["organization_id"],
+                row["name"],
+                row["owner_id"],
+                row["update_time"],
+                row["label_ids"],
+                row["labels"],
+                row["raw_payload"],
+            ),
+        axis=1,
     )
 
+    # ---------------------------------
+    # Final string normalization
+    # ---------------------------------
+
+    string_columns = [
+        "name",
+        "visible_to",
+        "label_ids",
+        "labels",
+        "address",
+        "raw_payload",
+        "source_system",
+        "run_id",
+        "record_hash",
+    ]
+
+    for col in string_columns:
+
+        if col in transformed.columns:
+
+            transformed[col] = (
+                transformed[col]
+                .apply(
+                    lambda value:
+                        None
+                        if value is None
+                        or (
+                            pd.api.types.is_scalar(value)
+                            and pd.isna(value)
+                        )
+                        else str(value)
+                )
+                .astype("string")
+            )
+
     logger.info(
-        f"Transformation complete "
-        f"| rows={len(transformed)}"
+        "Transformation complete "
+        f"| rows={len(transformed)} "
+        f"| columns={len(transformed.columns)}"
     )
 
     return transformed
@@ -467,12 +711,18 @@ def run_etl():
     client = get_bq_client()
 
     run_id = (
-        datetime.now(timezone.utc)
-        .strftime("%Y%m%d_%H%M%S")
+        datetime.now(
+            timezone.utc
+        )
+        .strftime(
+            "%Y%m%d_%H%M%S"
+        )
     )
 
-    started_at = datetime.now(
-        timezone.utc
+    started_at = (
+        datetime.now(
+            timezone.utc
+        )
     )
 
     try:
@@ -484,13 +734,14 @@ def run_etl():
         validate_config()
 
         logger.info(
-            f"Pipeline started "
+            "Pipeline started "
             f"| pipeline={PIPELINE_NAME} "
-            f"| mode={LOAD_MODE}"
+            f"| run_id={run_id} "
+            f"| load_mode={LOAD_MODE}"
         )
 
         logger.info(
-            f"Target table: {RAW_TABLE}"
+            f"Target raw table: {RAW_TABLE}"
         )
 
         # ---------------------------------
@@ -504,12 +755,12 @@ def run_etl():
         # ---------------------------------
 
         df = transform_dataframe(
-            raw_df,
-            run_id,
+            df=raw_df,
+            run_id=run_id,
         )
 
         # ---------------------------------
-        # Load BigQuery
+        # BigQuery load
         # ---------------------------------
 
         load_dataframe_in_chunks(
@@ -520,12 +771,14 @@ def run_etl():
             chunk_size=CHUNK_SIZE,
         )
 
-        finished_at = datetime.now(
-            timezone.utc
+        finished_at = (
+            datetime.now(
+                timezone.utc
+            )
         )
 
         # ---------------------------------
-        # Success logging
+        # Pipeline metadata
         # ---------------------------------
 
         log_pipeline_run(
@@ -538,14 +791,14 @@ def run_etl():
             started_at=started_at,
             finished_at=finished_at,
             message=(
-                f"Pipeline succeeded "
+                "Pipeline succeeded "
                 f"| load_mode={LOAD_MODE}"
             ),
         )
 
         logger.info(
-            f"Pipeline finished successfully "
-            f"| rows={len(df)} "
+            "Pipeline finished successfully "
+            f"| rows_loaded={len(df)} "
             f"| run_id={run_id}"
         )
 
@@ -557,12 +810,14 @@ def run_etl():
 
     except Exception as e:
 
-        finished_at = datetime.now(
-            timezone.utc
+        finished_at = (
+            datetime.now(
+                timezone.utc
+            )
         )
 
         # ---------------------------------
-        # Failure logging
+        # Failed pipeline metadata
         # ---------------------------------
 
         try:
@@ -582,8 +837,9 @@ def run_etl():
         except Exception as log_error:
 
             logger.error(
-                f"Could not log failure: "
-                f"{log_error}"
+                "Could not log "
+                "failed pipeline run "
+                f"| error={log_error}"
             )
 
         # ---------------------------------
@@ -593,7 +849,7 @@ def run_etl():
         send_email(
             subject=(
                 f"❌ {PIPELINE_NAME} "
-                f"pipeline failed"
+                "pipeline failed"
             ),
             body=(
                 f"Pipeline: {PIPELINE_NAME}\n"
@@ -605,7 +861,7 @@ def run_etl():
         )
 
         logger.exception(
-            f"Pipeline failed "
+            "Pipeline failed "
             f"| run_id={run_id}"
         )
 
