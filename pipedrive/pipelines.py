@@ -44,8 +44,15 @@ PIPELINE_NAME = os.environ.get(
     "pipedrive_pipelines",
 )
 
-SOURCE_SYSTEM = "pipedrive"
-TABLE_NAME = "pipelines"
+SOURCE_SYSTEM = os.environ.get(
+    "SOURCE_SYSTEM",
+    "pipedrive",
+)
+
+TABLE_NAME = os.environ.get(
+    "TABLE_NAME",
+    "pipelines",
+)
 
 PIPEDRIVE_API_TOKEN = os.environ.get(
     "PIPEDRIVE_API_TOKEN"
@@ -175,6 +182,8 @@ def validate_config():
         "DATASET_RAW": DATASET_RAW,
         "DATASET_META": DATASET_META,
         "PIPELINE_NAME": PIPELINE_NAME,
+        "TABLE_NAME": TABLE_NAME,
+        "SOURCE_SYSTEM": SOURCE_SYSTEM,
         "PIPEDRIVE_API_TOKEN": PIPEDRIVE_API_TOKEN,
         "PIPEDRIVE_COMPANY_DOMAIN": PIPEDRIVE_COMPANY_DOMAIN,
     })
@@ -234,11 +243,11 @@ def clean_json_value(value):
 def fetch_page(cursor=None):
 
     params = {
-    "api_token": PIPEDRIVE_API_TOKEN,
-    "limit": PAGE_SIZE,
-    "sort_by": "id",
-    "sort_direction": "asc",
-}
+        "api_token": PIPEDRIVE_API_TOKEN,
+        "limit": PAGE_SIZE,
+        "sort_by": "id",
+        "sort_direction": "asc",
+    }
 
     if cursor:
         params["cursor"] = cursor
@@ -452,7 +461,9 @@ def transform_dataframe(
         else None
     )
 
-    transformed["is_deal_probability_enabled"] = (
+    transformed[
+        "is_deal_probability_enabled"
+    ] = (
         df["is_deal_probability_enabled"]
         .astype("boolean")
         if "is_deal_probability_enabled" in df.columns
@@ -537,7 +548,9 @@ def transform_dataframe(
                     row["name"],
                     row["order_nr"],
                     row["is_selected"],
-                    row["is_deal_probability_enabled"],
+                    row[
+                        "is_deal_probability_enabled"
+                    ],
                     row["update_time"],
                     row["raw_payload"],
                 ),
