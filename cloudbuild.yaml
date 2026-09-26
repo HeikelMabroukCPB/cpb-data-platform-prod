@@ -776,14 +776,14 @@ steps:
       - '--region'
       - 'europe-west1'
 
-  # Update Cloud Run job: pipedrive-organizationFields
+  # Update Cloud Run job: pipedrive-organizationfields
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
       - 'jobs'
       - 'update'
-      - 'pipedrive-organizationFields'
+      - 'pipedrive-organizationfields'
       - '--image'
       - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
       - '--region'
