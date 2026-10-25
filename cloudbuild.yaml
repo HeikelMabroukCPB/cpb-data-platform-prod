@@ -880,6 +880,19 @@ steps:
       - '--region'
       - 'europe-west1'
 
+  # Update Cloud Run job: ninox-minute-pricing
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'ninox-minute-pricing'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/cpb-data-platform-prod/pipelines/salonkee-jobs:$SHORT_SHA'
+      - '--region'
+      - 'europe-west1'
+
 options:
   logging: CLOUD_LOGGING_ONLY
 
