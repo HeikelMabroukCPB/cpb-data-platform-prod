@@ -1,9 +1,7 @@
-import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
+from datetime import datetime
 
 import pandas as pd
 import requests
@@ -13,6 +11,7 @@ from shared.bq import get_bq_client, load_dataframe_in_chunks
 from shared.mail import send_email
 from shared.metadata import log_pipeline_run
 from shared.utils import (
+    build_incremental_params,
     generate_record_hash_from_values,
     normalize_nullable_string,
     validate_common_config,
@@ -32,32 +31,20 @@ DATASET_META = os.environ.get("DATASET_META", "cpb_meta")
 
 PIPELINE_NAME = os.environ.get("PIPELINE_NAME", "salonkee_services")
 TABLE_NAME = os.environ.get("TABLE_NAME", "services")
-SOURCE_SYSTEM = os.environ.get("SOURCE_SYSTEM", "salonkee")
 
-API_URL = os.environ.get(
-    "API_URL",
-    (
-        "https://salonkee.be/api/web-services/"
-        "v3/partners/salons/services?salonGroupId=157"
-    ),
-)
+API_URL = os.environ.get("API_URL")
 API_TOKEN = os.environ.get("API_TOKEN")
-API_LANGUAGE = os.environ.get("API_LANGUAGE", "nl").strip()
 
-LOAD_MODE = os.environ.get("LOAD_MODE", "full").strip().lower()
+LOAD_MODE = os.environ.get("LOAD_MODE", "full").lower()
+INCREMENTAL_FIELD = os.environ.get("INCREMENTAL_FIELD", "updatedSince")
+INCREMENTAL_LOOKBACK_DAYS = int(os.environ.get("INCREMENTAL_LOOKBACK_DAYS", 2))
 
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 3))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", 60))
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 5000))
-PAGE_SIZE = int(os.environ.get("PAGE_SIZE", 10000))
+RATE_LIMIT_SLEEP_SECONDS = int(os.environ.get("RATE_LIMIT_SLEEP_SECONDS", 90))
 
-RATE_LIMIT_SLEEP_SECONDS = int(
-    os.environ.get("RATE_LIMIT_SLEEP_SECONDS", 90)
-)
-
-INCLUDE_DELETED = os.environ.get(
-    "INCLUDE_DELETED", "false"
-).strip().lower()
+SOURCE_SYSTEM = os.environ.get("SOURCE_SYSTEM", "salonkee")
 
 RAW_TABLE = f"{PROJECT_ID}.{DATASET_RAW}.{SOURCE_SYSTEM}_{TABLE_NAME}"
 META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
@@ -65,10 +52,8 @@ META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 
 # =================================
 # Table schema
+# Raw = keep source names as-is
 # =================================
-# Existing destination names are retained.
-# Nested data is stored as JSON-formatted STRINGs.
-# raw_payload preserves all returned source fields.
 
 TABLE_SCHEMA = [
     bigquery.SchemaField("service_id", "INT64"),
@@ -76,13 +61,6 @@ TABLE_SCHEMA = [
     bigquery.SchemaField("service_group_id", "INT64"),
     bigquery.SchemaField("service_group_name", "STRING"),
     bigquery.SchemaField("salon_id", "INT64"),
-    bigquery.SchemaField("type", "STRING"),
-    bigquery.SchemaField("displayGroupSortIndex", "INT64"),
-    bigquery.SchemaField("updated", "TIMESTAMP"),
-    bigquery.SchemaField("items", "STRING"),
-    bigquery.SchemaField("name_json", "STRING"),
-    bigquery.SchemaField("displayGroupName_json", "STRING"),
-    bigquery.SchemaField("raw_payload", "STRING"),
     bigquery.SchemaField("source_system", "STRING"),
     bigquery.SchemaField("run_id", "STRING"),
     bigquery.SchemaField("load_timestamp", "TIMESTAMP"),
@@ -90,16 +68,20 @@ TABLE_SCHEMA = [
     bigquery.SchemaField("record_hash", "STRING"),
 ]
 
+SELECTED_COLUMNS = [
+    "service_id",
+    "service_name",
+    "service_group_id",
+    "service_group_name",
+    "salon_id",
+]
+
 
 # =================================
 # Helpers
 # =================================
 
-def utc_now():
-    return datetime.now(timezone.utc)
-
-
-def validate_config():
+def validate_config() -> None:
     validate_common_config({
         "PROJECT_ID": PROJECT_ID,
         "DATASET_RAW": DATASET_RAW,
@@ -111,464 +93,148 @@ def validate_config():
         "SOURCE_SYSTEM": SOURCE_SYSTEM,
     })
 
-    if LOAD_MODE != "full":
-        raise ValueError(
-            "Set LOAD_MODE=full. This V3 endpoint does not "
-            "document an incremental filter."
-        )
-
-    if MAX_RETRIES < 1:
-        raise ValueError("MAX_RETRIES must be at least 1")
-
-    if REQUEST_TIMEOUT <= 0:
-        raise ValueError("REQUEST_TIMEOUT must be greater than 0")
-
-    if CHUNK_SIZE <= 0:
-        raise ValueError("CHUNK_SIZE must be greater than 0")
-
-    if not 1 <= PAGE_SIZE <= 100000:
-        raise ValueError("PAGE_SIZE must be between 1 and 100000")
-
-    if RATE_LIMIT_SLEEP_SECONDS < 0:
-        raise ValueError("RATE_LIMIT_SLEEP_SECONDS cannot be negative")
-
-    if INCLUDE_DELETED not in {"true", "false"}:
-        raise ValueError("INCLUDE_DELETED must be 'true' or 'false'")
-
-
-def to_json(value):
-    if value is None:
-        return None
-
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def localized_name(value):
-    if value is None or isinstance(value, str):
-        return value
-
-    if not isinstance(value, dict):
-        raise ValueError(
-            f"Unexpected name type: {type(value).__name__}"
-        )
-
-    languages = list(dict.fromkeys([
-        API_LANGUAGE,
-        "nl",
-        "en",
-        "fr",
-        "de",
-        "it",
-    ]))
-
-    for language in languages:
-        text = value.get(language)
-
-        if isinstance(text, str) and text:
-            return text
-
-    return next(
-        (
-            text
-            for text in value.values()
-            if isinstance(text, str) and text
-        ),
-        None,
-    )
+    if LOAD_MODE not in ["full", "incremental"]:
+        raise ValueError("LOAD_MODE must be either 'full' or 'incremental'")
 
 
 def extract_page_records(payload):
+    if not payload:
+        return []
+
     if isinstance(payload, list):
-        records = payload
-    elif (
-        isinstance(payload, dict)
-        and isinstance(payload.get("data"), list)
-    ):
-        records = payload["data"]
-    else:
-        raise ValueError(
-            "Unexpected API response: expected a list or "
-            "an object containing a 'data' list."
-        )
+        return payload
 
-    if any(not isinstance(record, dict) for record in records):
-        raise ValueError("Every API record must be a JSON object.")
+    if isinstance(payload, dict):
+        if "data" in payload and isinstance(payload["data"], list):
+            return payload["data"]
+        return [payload]
 
-    return records
-
-
-def retry_after_seconds(response):
-    value = response.headers.get("Retry-After")
-
-    if value:
-        try:
-            return max(0.0, float(value))
-        except ValueError:
-            try:
-                retry_at = parsedate_to_datetime(value)
-
-                if retry_at.tzinfo is None:
-                    retry_at = retry_at.replace(tzinfo=timezone.utc)
-
-                return max(
-                    0.0,
-                    (retry_at - utc_now()).total_seconds(),
-                )
-            except (TypeError, ValueError, OverflowError):
-                pass
-
-    return float(RATE_LIMIT_SLEEP_SECONDS)
-
-
-def log_api_error(response):
-    # Do not log request headers: they contain the API token.
-    logger.error(
-        "API request failed | status=%s | url=%s | "
-        "content_type=%s | response_body=%s",
-        response.status_code,
-        response.url,
-        response.headers.get("Content-Type"),
-        response.text[:4000],
-    )
-
-    if response.status_code == 404:
-        logger.error(
-            "API returned 404. Check the response body above. "
-            "Confirm the production V3 base URL, endpoint path, "
-            "and partner access to the requested salon group "
-            "with Salonkee."
-        )
-
-
-def ensure_raw_table_schema(client):
-    """Create the table or add missing nullable columns."""
-    desired_table = bigquery.Table(
-        RAW_TABLE,
-        schema=TABLE_SCHEMA,
-    )
-    table = client.create_table(
-        desired_table,
-        exists_ok=True,
-    )
-
-    existing_fields = {
-        field.name.lower(): field
-        for field in table.schema
-    }
-
-    missing_fields = []
-
-    for field in TABLE_SCHEMA:
-        existing = existing_fields.get(field.name.lower())
-
-        if existing is None:
-            missing_fields.append(field)
-            continue
-
-        if (
-            existing.field_type != field.field_type
-            or existing.mode != field.mode
-        ):
-            raise ValueError(
-                f"Incompatible BigQuery column '{field.name}': "
-                f"existing={existing.field_type}/{existing.mode}, "
-                f"expected={field.field_type}/{field.mode}"
-            )
-
-    if missing_fields:
-        table.schema = list(table.schema) + missing_fields
-        client.update_table(table, ["schema"])
-
-        logger.info(
-            "Added BigQuery columns: %s",
-            [field.name for field in missing_fields],
-        )
+    raise ValueError("Unsupported API response format")
 
 
 # =================================
 # API fetch
 # =================================
 
-def fetch_page(session, headers, params):
-    for attempt in range(1, MAX_RETRIES + 1):
-        logger.info(
-            "Fetching API page | offset=%s | limit=%s | "
-            "attempt=%s/%s",
-            params["offset"],
-            params["limit"],
-            attempt,
-            MAX_RETRIES,
-        )
-
-        try:
-            response = session.get(
-                API_URL,
-                headers=headers,
-                params=params,
-                timeout=REQUEST_TIMEOUT,
-            )
-        except (
-            requests.exceptions.Timeout,
-            requests.exceptions.ConnectionError,
-        ) as error:
-            if attempt == MAX_RETRIES:
-                raise
-
-            wait_seconds = min(5 * (2 ** (attempt - 1)), 60)
-
-            logger.warning(
-                "API connection failed: %s | retrying in %s seconds",
-                error,
-                wait_seconds,
-            )
-            time.sleep(wait_seconds)
-            continue
-
-        with response:
-            retryable = (
-                response.status_code == 429
-                or 500 <= response.status_code < 600
-            )
-
-            if retryable:
-                log_api_error(response)
-
-                if attempt == MAX_RETRIES:
-                    response.raise_for_status()
-
-                wait_seconds = (
-                    retry_after_seconds(response)
-                    if response.status_code == 429
-                    else min(5 * (2 ** (attempt - 1)), 60)
-                )
-
-                logger.warning(
-                    "Retrying HTTP %s in %s seconds",
-                    response.status_code,
-                    wait_seconds,
-                )
-
-            else:
-                if not response.ok:
-                    log_api_error(response)
-
-                # Fail immediately on non-retryable errors,
-                # including 400, 401, 403, and 404.
-                response.raise_for_status()
-
-                try:
-                    payload = response.json()
-                except ValueError as error:
-                    raise ValueError(
-                        "API returned a successful HTTP status "
-                        "but the response was not valid JSON."
-                    ) from error
-
-                return extract_page_records(payload)
-
-        time.sleep(wait_seconds)
-
-    raise RuntimeError("Failed to fetch API page.")
-
-
-def fetch_data():
+def fetch_data() -> pd.DataFrame:
     headers = {
         "Authorization": f"Bearer {API_TOKEN}",
         "Accept": "application/json",
         "User-Agent": "cpb-data-platform/1.0",
     }
 
-    if API_LANGUAGE:
-        headers["Accept-Language"] = API_LANGUAGE
-
-    all_records = []
-    offset = 0
-    previous_page_hash = None
-
-    with requests.Session() as session:
-        while True:
-            params = {
-                "offset": offset,
-                "limit": PAGE_SIZE,
-                "includeDeleted": INCLUDE_DELETED,
-            }
-
-            records = fetch_page(
-                session=session,
-                headers=headers,
-                params=params,
-            )
-
-            # Detect an endpoint that ignores offset and
-            # repeatedly returns the same page.
-            if records:
-                page_hash = generate_record_hash_from_values(
-                    to_json(records)
-                )
-
-                if page_hash == previous_page_hash:
-                    raise RuntimeError(
-                        "API returned the same page twice. "
-                        "Pagination may be ignoring offset."
-                    )
-
-                previous_page_hash = page_hash
-
-            all_records.extend(records)
-
-            logger.info(
-                "Fetched API page | offset=%s | page_rows=%s | "
-                "total_rows=%s",
-                offset,
-                len(records),
-                len(all_records),
-            )
-
-            if len(records) < PAGE_SIZE:
-                break
-
-            offset += len(records)
-
-    logger.info(
-        "API fetch complete | rows=%s",
-        len(all_records),
+    params = build_incremental_params(
+        load_mode=LOAD_MODE,
+        incremental_field=INCREMENTAL_FIELD,
+        incremental_lookback_days=INCREMENTAL_LOOKBACK_DAYS,
     )
 
-    # Keep nested dictionaries and lists intact.
-    return pd.DataFrame({"raw_payload": all_records})
+    logger.info(f"Fetching data from API | url={API_URL} | params={params}")
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.info(f"Sending request attempt {attempt}/{MAX_RETRIES}")
+
+            response = requests.get(
+                API_URL,
+                headers=headers,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+            )
+
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+                wait_seconds = (
+                    int(retry_after)
+                    if retry_after and retry_after.isdigit()
+                    else RATE_LIMIT_SLEEP_SECONDS
+                )
+
+                logger.warning(
+                    f"Rate limit hit on attempt {attempt}/{MAX_RETRIES}. "
+                    f"Waiting {wait_seconds} seconds before retry."
+                )
+                logger.warning(f"429 response headers: {dict(response.headers)}")
+                logger.warning(f"429 response body: {response.text}")
+
+                if attempt == MAX_RETRIES:
+                    response.raise_for_status()
+
+                time.sleep(wait_seconds)
+                continue
+
+            response.raise_for_status()
+
+            data = response.json()
+            records = extract_page_records(data)
+            df = pd.json_normalize(records)
+
+            logger.info(f"Fetched {len(df)} rows from API")
+            logger.info(f"Columns received: {list(df.columns)}")
+
+            return df
+
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"HTTP error on attempt {attempt}/{MAX_RETRIES}: {e}")
+
+            if attempt == MAX_RETRIES:
+                raise
+
+            time.sleep(5)
+
+        except Exception as e:
+            logger.warning(f"Attempt {attempt}/{MAX_RETRIES} failed: {e}")
+
+            if attempt == MAX_RETRIES:
+                raise
+
+            time.sleep(5)
+
+    raise RuntimeError("Failed to fetch data from API")
 
 
 # =================================
 # Transform
 # =================================
 
-def transform_dataframe(df, run_id):
-    logger.info(
-        "Transforming V3 services and bundles for raw layer"
-    )
+def transform_dataframe(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
+    logger.info("Transforming dataframe for raw layer")
 
-    rows = []
-
-    for record in df["raw_payload"]:
-        if record.get("id") is None:
-            raise ValueError(
-                "API record is missing required field 'id'."
-            )
-
-        if record.get("salonId") is None:
-            raise ValueError(
-                "API record is missing required field 'salonId'."
-            )
-
-        payload_json = to_json(record)
-
-        rows.append({
-            # Existing destination columns
-            "service_id": record.get("id"),
-            "service_name": localized_name(record.get("name")),
-            "service_group_id": record.get("displayGroupId"),
-            "service_group_name": localized_name(
-                record.get("displayGroupName")
-            ),
-            "salon_id": record.get("salonId"),
-
-            # All returned record types are retained
-            "type": record.get("type"),
-            "displayGroupSortIndex": record.get(
-                "displayGroupSortIndex"
-            ),
-            "updated": record.get("updated"),
-
-            # Nested item fields are preserved as JSON
-            "items": to_json(record.get("items")),
-
-            # Preserve returned translation values
-            "name_json": to_json(record.get("name")),
-            "displayGroupName_json": to_json(
-                record.get("displayGroupName")
-            ),
-
-            # Includes any additional, undocumented fields
-            "raw_payload": payload_json,
-
-            # Hash every source field, including nested data
-            "record_hash": generate_record_hash_from_values(
-                payload_json
-            ),
-        })
-
-    metadata_columns = {
-        "source_system",
-        "run_id",
-        "load_timestamp",
-        "load_date",
-    }
-
-    source_columns = [
-        field.name
-        for field in TABLE_SCHEMA
-        if field.name not in metadata_columns
-    ]
-
-    result = pd.DataFrame(
-        rows,
-        columns=source_columns,
-    )
-
-    for column in [
-        "service_id",
-        "service_group_id",
-        "salon_id",
-        "displayGroupSortIndex",
-    ]:
-        result[column] = pd.to_numeric(
-            result[column],
-            errors="raise",
-        ).astype("Int64")
-
-    for column in [
-        "service_name",
-        "service_group_name",
-        "type",
-        "items",
-        "name_json",
-        "displayGroupName_json",
-        "raw_payload",
-        "record_hash",
-    ]:
-        result[column] = normalize_nullable_string(
-            result[column]
+    missing_cols = [col for col in SELECTED_COLUMNS if col not in df.columns]
+    if missing_cols:
+        raise ValueError(
+            f"Missing expected raw columns: {missing_cols}. "
+            f"Available columns: {list(df.columns)}"
         )
 
-    result["updated"] = pd.to_datetime(
-        result["updated"],
-        utc=True,
-        errors="raise",
+    df = df[SELECTED_COLUMNS].copy()
+
+    df["service_id"] = pd.to_numeric(df["service_id"], errors="coerce").astype("Int64")
+    df["service_name"] = normalize_nullable_string(df["service_name"])
+    df["service_group_id"] = pd.to_numeric(df["service_group_id"], errors="coerce").astype("Int64")
+    df["service_group_name"] = normalize_nullable_string(df["service_group_name"])
+    df["salon_id"] = pd.to_numeric(df["salon_id"], errors="coerce").astype("Int64")
+
+    load_timestamp = datetime.utcnow()
+    load_date = load_timestamp.date()
+
+    df["source_system"] = SOURCE_SYSTEM
+    df["run_id"] = run_id
+    df["load_timestamp"] = load_timestamp
+    df["load_date"] = load_date
+    df["record_hash"] = df.apply(
+        lambda row: generate_record_hash_from_values(
+            row.get("service_id"),
+            row.get("service_name"),
+            row.get("service_group_id"),
+            row.get("service_group_name"),
+            row.get("salon_id"),
+        ),
+        axis=1,
     )
 
-    load_timestamp = utc_now()
-
-    result["source_system"] = SOURCE_SYSTEM
-    result["run_id"] = run_id
-    result["load_timestamp"] = load_timestamp
-    result["load_date"] = load_timestamp.date()
-
-    result = result[
-        [field.name for field in TABLE_SCHEMA]
-    ]
-
-    logger.info(
-        "Transformation complete | rows=%s",
-        len(result),
-    )
-
-    return result
+    logger.info(f"Transformation complete | rows={len(df)}")
+    return df
 
 
 # =================================
@@ -576,27 +242,19 @@ def transform_dataframe(df, run_id):
 # =================================
 
 def run_etl():
-    client = None
-    run_id = utc_now().strftime("%Y%m%d_%H%M%S_%f")
-    started_at = utc_now()
+    client = get_bq_client()
+    run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    started_at = datetime.utcnow()
 
-    logger.info(
-        "Pipeline started | pipeline=%s | run_id=%s",
-        PIPELINE_NAME,
-        run_id,
-    )
-    logger.info("Target raw table: %s", RAW_TABLE)
+    logger.info(f"Pipeline started | pipeline={PIPELINE_NAME} | run_id={run_id}")
+    logger.info(f"Target raw table: {RAW_TABLE}")
 
     try:
         validate_config()
-        client = get_bq_client()
 
         raw_df = fetch_data()
         df = transform_dataframe(raw_df, run_id)
 
-        ensure_raw_table_schema(client)
-
-        # Uses your existing shared loader's write behavior.
         load_dataframe_in_chunks(
             client=client,
             df=df,
@@ -605,7 +263,7 @@ def run_etl():
             chunk_size=CHUNK_SIZE,
         )
 
-        finished_at = utc_now()
+        finished_at = datetime.utcnow()
 
         log_pipeline_run(
             client=client,
@@ -620,73 +278,37 @@ def run_etl():
         )
 
         logger.info(
-            "Pipeline finished successfully | rows_loaded=%s | "
-            "run_id=%s",
-            len(df),
-            run_id,
+            f"Pipeline finished successfully | rows_loaded={len(df)} | run_id={run_id}"
         )
-
         return f"{len(df)} rows loaded into {RAW_TABLE}", 200
 
-    except Exception as error:
-        finished_at = utc_now()
-
-        logger.exception(
-            "Pipeline failed | run_id=%s",
-            run_id,
-        )
-
-        if client is not None:
-            try:
-                log_pipeline_run(
-                    client=client,
-                    meta_table=META_TABLE,
-                    pipeline_name=PIPELINE_NAME,
-                    run_id=run_id,
-                    status="FAILED",
-                    rows_loaded=0,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    message=str(error),
-                )
-            except Exception:
-                logger.exception(
-                    "Could not log failed pipeline run"
-                )
+    except Exception as e:
+        finished_at = datetime.utcnow()
 
         try:
-            send_email(
-                subject=f"❌ {PIPELINE_NAME} pipeline failed",
-                body=(
-                    f"Pipeline: {PIPELINE_NAME}\n"
-                    f"Run ID: {run_id}\n"
-                    f"Time: {finished_at.isoformat()}\n"
-                    f"Error: {error}\n\n"
-                    "Check Cloud Run logs for the API response "
-                    "status and response body."
-                ),
+            log_pipeline_run(
+                client=client,
+                meta_table=META_TABLE,
+                pipeline_name=PIPELINE_NAME,
+                run_id=run_id,
+                status="FAILED",
+                rows_loaded=0,
+                started_at=started_at,
+                finished_at=finished_at,
+                message=str(e),
             )
-        except Exception:
-            logger.exception(
-                "Could not send pipeline failure email"
-            )
+        except Exception as log_error:
+            logger.error(f"Could not log failed pipeline run: {log_error}")
 
-        return f"Pipeline failed: {error}", 500
+        send_email(
+            subject=f"❌ {PIPELINE_NAME} pipeline failed",
+            body=(
+                f"Pipeline: {PIPELINE_NAME}\n"
+                f"Run ID: {run_id}\n"
+                f"Time: {finished_at}\n"
+                f"Error: {str(e)}"
+            ),
+        )
 
-
-# =================================
-# Direct execution
-# =================================
-# Your existing job_runner.py can continue importing run_etl().
-# This block runs only when this file is executed directly.
-
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-
-    message, status_code = run_etl()
-    logger.info("%s", message)
-
-    raise SystemExit(0 if status_code == 200 else 1)
+        logger.exception(f"Pipeline failed | run_id={run_id}")
+        return f"Pipeline failed: {str(e)}", 500
