@@ -32,6 +32,7 @@ DATASET_META = os.environ.get("DATASET_META", "cpb_meta")
 
 PIPELINE_NAME = os.environ.get("PIPELINE_NAME", "salonkee_services")
 TABLE_NAME = os.environ.get("TABLE_NAME", "services")
+SOURCE_SYSTEM = os.environ.get("SOURCE_SYSTEM", "salonkee")
 
 API_URL = os.environ.get(
     "API_URL",
@@ -41,10 +42,9 @@ API_URL = os.environ.get(
     ),
 )
 API_TOKEN = os.environ.get("API_TOKEN")
-API_LANGUAGE = os.environ.get("API_LANGUAGE", "nl")
+API_LANGUAGE = os.environ.get("API_LANGUAGE", "nl").strip()
 
-# This endpoint does not document an incremental filter.
-LOAD_MODE = os.environ.get("LOAD_MODE", "full").lower()
+LOAD_MODE = os.environ.get("LOAD_MODE", "full").strip().lower()
 
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 3))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", 60))
@@ -59,8 +59,6 @@ INCLUDE_DELETED = os.environ.get(
     "INCLUDE_DELETED", "false"
 ).strip().lower()
 
-SOURCE_SYSTEM = os.environ.get("SOURCE_SYSTEM", "salonkee")
-
 RAW_TABLE = f"{PROJECT_ID}.{DATASET_RAW}.{SOURCE_SYSTEM}_{TABLE_NAME}"
 META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 
@@ -68,9 +66,9 @@ META_TABLE = f"{PROJECT_ID}.{DATASET_META}.pipeline_runs"
 # =================================
 # Table schema
 # =================================
-# Keep the existing destination columns.
-# Nested fields are stored as JSON-formatted STRINGs.
-# raw_payload preserves the complete source record.
+# Existing destination names are retained.
+# Nested data is stored as JSON-formatted STRINGs.
+# raw_payload preserves all returned source fields.
 
 TABLE_SCHEMA = [
     bigquery.SchemaField("service_id", "INT64"),
@@ -78,19 +76,13 @@ TABLE_SCHEMA = [
     bigquery.SchemaField("service_group_id", "INT64"),
     bigquery.SchemaField("service_group_name", "STRING"),
     bigquery.SchemaField("salon_id", "INT64"),
-
-    # Additional V3 fields
     bigquery.SchemaField("type", "STRING"),
     bigquery.SchemaField("displayGroupSortIndex", "INT64"),
     bigquery.SchemaField("updated", "TIMESTAMP"),
     bigquery.SchemaField("items", "STRING"),
-
-    # Preserve translations and complete source data
     bigquery.SchemaField("name_json", "STRING"),
     bigquery.SchemaField("displayGroupName_json", "STRING"),
     bigquery.SchemaField("raw_payload", "STRING"),
-
-    # Pipeline metadata
     bigquery.SchemaField("source_system", "STRING"),
     bigquery.SchemaField("run_id", "STRING"),
     bigquery.SchemaField("load_timestamp", "TIMESTAMP"),
@@ -103,11 +95,11 @@ TABLE_SCHEMA = [
 # Helpers
 # =================================
 
-def utc_now() -> datetime:
+def utc_now():
     return datetime.now(timezone.utc)
 
 
-def validate_config() -> None:
+def validate_config():
     validate_common_config({
         "PROJECT_ID": PROJECT_ID,
         "DATASET_RAW": DATASET_RAW,
@@ -121,8 +113,8 @@ def validate_config() -> None:
 
     if LOAD_MODE != "full":
         raise ValueError(
-            "This V3 endpoint does not document an incremental filter. "
-            "Set LOAD_MODE=full."
+            "Set LOAD_MODE=full. This V3 endpoint does not "
+            "document an incremental filter."
         )
 
     if MAX_RETRIES < 1:
@@ -144,26 +136,6 @@ def validate_config() -> None:
         raise ValueError("INCLUDE_DELETED must be 'true' or 'false'")
 
 
-def extract_page_records(payload) -> list:
-    if isinstance(payload, list):
-        records = payload
-    elif (
-        isinstance(payload, dict)
-        and isinstance(payload.get("data"), list)
-    ):
-        records = payload["data"]
-    else:
-        raise ValueError(
-            "Unexpected API response: expected a list or "
-            "an object containing a 'data' list"
-        )
-
-    if any(not isinstance(record, dict) for record in records):
-        raise ValueError("Every API record must be a JSON object")
-
-    return records
-
-
 def to_json(value):
     if value is None:
         return None
@@ -178,43 +150,60 @@ def to_json(value):
 
 
 def localized_name(value):
-    if value is None:
-        return None
-
-    if isinstance(value, str):
+    if value is None or isinstance(value, str):
         return value
 
-    if isinstance(value, dict):
-        languages = list(dict.fromkeys([
-            API_LANGUAGE,
-            "nl",
-            "en",
-            "fr",
-            "de",
-            "it",
-        ]))
-
-        for language in languages:
-            text = value.get(language)
-
-            if isinstance(text, str) and text:
-                return text
-
-        return next(
-            (
-                text
-                for text in value.values()
-                if isinstance(text, str) and text
-            ),
-            None,
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Unexpected name type: {type(value).__name__}"
         )
 
-    raise ValueError(
-        f"Unexpected localized name type: {type(value).__name__}"
+    languages = list(dict.fromkeys([
+        API_LANGUAGE,
+        "nl",
+        "en",
+        "fr",
+        "de",
+        "it",
+    ]))
+
+    for language in languages:
+        text = value.get(language)
+
+        if isinstance(text, str) and text:
+            return text
+
+    return next(
+        (
+            text
+            for text in value.values()
+            if isinstance(text, str) and text
+        ),
+        None,
     )
 
 
-def retry_after_seconds(response) -> float:
+def extract_page_records(payload):
+    if isinstance(payload, list):
+        records = payload
+    elif (
+        isinstance(payload, dict)
+        and isinstance(payload.get("data"), list)
+    ):
+        records = payload["data"]
+    else:
+        raise ValueError(
+            "Unexpected API response: expected a list or "
+            "an object containing a 'data' list."
+        )
+
+    if any(not isinstance(record, dict) for record in records):
+        raise ValueError("Every API record must be a JSON object.")
+
+    return records
+
+
+def retry_after_seconds(response):
     value = response.headers.get("Retry-After")
 
     if value:
@@ -237,13 +226,36 @@ def retry_after_seconds(response) -> float:
     return float(RATE_LIMIT_SLEEP_SECONDS)
 
 
-def ensure_raw_table_schema(client) -> None:
-    """
-    Create the table if needed, or add missing nullable columns.
-    Existing column types must match the configured schema.
-    """
-    desired_table = bigquery.Table(RAW_TABLE, schema=TABLE_SCHEMA)
-    table = client.create_table(desired_table, exists_ok=True)
+def log_api_error(response):
+    # Do not log request headers: they contain the API token.
+    logger.error(
+        "API request failed | status=%s | url=%s | "
+        "content_type=%s | response_body=%s",
+        response.status_code,
+        response.url,
+        response.headers.get("Content-Type"),
+        response.text[:4000],
+    )
+
+    if response.status_code == 404:
+        logger.error(
+            "API returned 404. Check the response body above. "
+            "Confirm the production V3 base URL, endpoint path, "
+            "and partner access to the requested salon group "
+            "with Salonkee."
+        )
+
+
+def ensure_raw_table_schema(client):
+    """Create the table or add missing nullable columns."""
+    desired_table = bigquery.Table(
+        RAW_TABLE,
+        schema=TABLE_SCHEMA,
+    )
+    table = client.create_table(
+        desired_table,
+        exists_ok=True,
+    )
 
     existing_fields = {
         field.name.lower(): field
@@ -283,10 +295,11 @@ def ensure_raw_table_schema(client) -> None:
 # API fetch
 # =================================
 
-def fetch_page(session, headers, params) -> list:
+def fetch_page(session, headers, params):
     for attempt in range(1, MAX_RETRIES + 1):
         logger.info(
-            "Fetching API page | offset=%s | limit=%s | attempt=%s/%s",
+            "Fetching API page | offset=%s | limit=%s | "
+            "attempt=%s/%s",
             params["offset"],
             params["limit"],
             attempt,
@@ -317,41 +330,54 @@ def fetch_page(session, headers, params) -> list:
             time.sleep(wait_seconds)
             continue
 
-        retryable = (
-            response.status_code == 429
-            or 500 <= response.status_code < 600
-        )
+        with response:
+            retryable = (
+                response.status_code == 429
+                or 500 <= response.status_code < 600
+            )
 
-        if retryable:
-            if attempt == MAX_RETRIES:
+            if retryable:
+                log_api_error(response)
+
+                if attempt == MAX_RETRIES:
+                    response.raise_for_status()
+
+                wait_seconds = (
+                    retry_after_seconds(response)
+                    if response.status_code == 429
+                    else min(5 * (2 ** (attempt - 1)), 60)
+                )
+
+                logger.warning(
+                    "Retrying HTTP %s in %s seconds",
+                    response.status_code,
+                    wait_seconds,
+                )
+
+            else:
+                if not response.ok:
+                    log_api_error(response)
+
+                # Fail immediately on non-retryable errors,
+                # including 400, 401, 403, and 404.
                 response.raise_for_status()
 
-            wait_seconds = (
-                retry_after_seconds(response)
-                if response.status_code == 429
-                else min(5 * (2 ** (attempt - 1)), 60)
-            )
+                try:
+                    payload = response.json()
+                except ValueError as error:
+                    raise ValueError(
+                        "API returned a successful HTTP status "
+                        "but the response was not valid JSON."
+                    ) from error
 
-            logger.warning(
-                "API returned HTTP %s | retrying in %s seconds",
-                response.status_code,
-                wait_seconds,
-            )
+                return extract_page_records(payload)
 
-            response.close()
-            time.sleep(wait_seconds)
-            continue
+        time.sleep(wait_seconds)
 
-        # Other HTTP errors, including authentication failures,
-        # fail immediately.
-        response.raise_for_status()
-
-        return extract_page_records(response.json())
-
-    raise RuntimeError("Failed to fetch API page")
+    raise RuntimeError("Failed to fetch API page.")
 
 
-def fetch_data() -> pd.DataFrame:
+def fetch_data():
     headers = {
         "Authorization": f"Bearer {API_TOKEN}",
         "Accept": "application/json",
@@ -363,6 +389,7 @@ def fetch_data() -> pd.DataFrame:
 
     all_records = []
     offset = 0
+    previous_page_hash = None
 
     with requests.Session() as session:
         while True:
@@ -378,10 +405,26 @@ def fetch_data() -> pd.DataFrame:
                 params=params,
             )
 
+            # Detect an endpoint that ignores offset and
+            # repeatedly returns the same page.
+            if records:
+                page_hash = generate_record_hash_from_values(
+                    to_json(records)
+                )
+
+                if page_hash == previous_page_hash:
+                    raise RuntimeError(
+                        "API returned the same page twice. "
+                        "Pagination may be ignoring offset."
+                    )
+
+                previous_page_hash = page_hash
+
             all_records.extend(records)
 
             logger.info(
-                "Fetched API page | offset=%s | page_rows=%s | total_rows=%s",
+                "Fetched API page | offset=%s | page_rows=%s | "
+                "total_rows=%s",
                 offset,
                 len(records),
                 len(all_records),
@@ -392,9 +435,12 @@ def fetch_data() -> pd.DataFrame:
 
             offset += len(records)
 
-    logger.info("API fetch complete | rows=%s", len(all_records))
+    logger.info(
+        "API fetch complete | rows=%s",
+        len(all_records),
+    )
 
-    # Preserve nested objects without flattening them.
+    # Keep nested dictionaries and lists intact.
     return pd.DataFrame({"raw_payload": all_records})
 
 
@@ -402,21 +448,22 @@ def fetch_data() -> pd.DataFrame:
 # Transform
 # =================================
 
-def transform_dataframe(
-    df: pd.DataFrame,
-    run_id: str,
-) -> pd.DataFrame:
-    logger.info("Transforming V3 services and bundles for raw layer")
+def transform_dataframe(df, run_id):
+    logger.info(
+        "Transforming V3 services and bundles for raw layer"
+    )
 
     rows = []
 
     for record in df["raw_payload"]:
         if record.get("id") is None:
-            raise ValueError("API record is missing required field 'id'")
+            raise ValueError(
+                "API record is missing required field 'id'."
+            )
 
         if record.get("salonId") is None:
             raise ValueError(
-                "API record is missing required field 'salonId'"
+                "API record is missing required field 'salonId'."
             )
 
         payload_json = to_json(record)
@@ -431,26 +478,26 @@ def transform_dataframe(
             ),
             "salon_id": record.get("salonId"),
 
-            # Keep service, bundle, and bundle_group records
+            # All returned record types are retained
             "type": record.get("type"),
             "displayGroupSortIndex": record.get(
                 "displayGroupSortIndex"
             ),
             "updated": record.get("updated"),
 
-            # Includes every nested item field
+            # Nested item fields are preserved as JSON
             "items": to_json(record.get("items")),
 
-            # Preserve returned translation objects or strings
+            # Preserve returned translation values
             "name_json": to_json(record.get("name")),
             "displayGroupName_json": to_json(
                 record.get("displayGroupName")
             ),
 
-            # Preserve all returned fields
+            # Includes any additional, undocumented fields
             "raw_payload": payload_json,
 
-            # Detect changes to any source field
+            # Hash every source field, including nested data
             "record_hash": generate_record_hash_from_values(
                 payload_json
             ),
@@ -469,22 +516,23 @@ def transform_dataframe(
         if field.name not in metadata_columns
     ]
 
-    result = pd.DataFrame(rows, columns=source_columns)
+    result = pd.DataFrame(
+        rows,
+        columns=source_columns,
+    )
 
-    integer_columns = [
+    for column in [
         "service_id",
         "service_group_id",
         "salon_id",
         "displayGroupSortIndex",
-    ]
-
-    for column in integer_columns:
+    ]:
         result[column] = pd.to_numeric(
             result[column],
             errors="raise",
         ).astype("Int64")
 
-    string_columns = [
+    for column in [
         "service_name",
         "service_group_name",
         "type",
@@ -493,9 +541,7 @@ def transform_dataframe(
         "displayGroupName_json",
         "raw_payload",
         "record_hash",
-    ]
-
-    for column in string_columns:
+    ]:
         result[column] = normalize_nullable_string(
             result[column]
         )
@@ -550,7 +596,7 @@ def run_etl():
 
         ensure_raw_table_schema(client)
 
-        # Keep the existing shared loader's write behavior.
+        # Uses your existing shared loader's write behavior.
         load_dataframe_in_chunks(
             client=client,
             df=df,
@@ -574,7 +620,8 @@ def run_etl():
         )
 
         logger.info(
-            "Pipeline finished successfully | rows_loaded=%s | run_id=%s",
+            "Pipeline finished successfully | rows_loaded=%s | "
+            "run_id=%s",
             len(df),
             run_id,
         )
@@ -614,7 +661,9 @@ def run_etl():
                     f"Pipeline: {PIPELINE_NAME}\n"
                     f"Run ID: {run_id}\n"
                     f"Time: {finished_at.isoformat()}\n"
-                    f"Error: {error}"
+                    f"Error: {error}\n\n"
+                    "Check Cloud Run logs for the API response "
+                    "status and response body."
                 ),
             )
         except Exception:
@@ -626,8 +675,10 @@ def run_etl():
 
 
 # =================================
-# Cloud Run job entry point
+# Direct execution
 # =================================
+# Your existing job_runner.py can continue importing run_etl().
+# This block runs only when this file is executed directly.
 
 if __name__ == "__main__":
     logging.basicConfig(
@@ -638,5 +689,4 @@ if __name__ == "__main__":
     message, status_code = run_etl()
     logger.info("%s", message)
 
-    # Cloud Run jobs use the process exit code to determine success.
     raise SystemExit(0 if status_code == 200 else 1)
